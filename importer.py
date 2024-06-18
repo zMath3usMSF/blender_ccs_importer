@@ -451,6 +451,44 @@ class importCCS:
                             fc.keyframe_points.foreach_set('co', [x for co in list(map(lambda f, v: (f, v[i]), rotations_quat.keys(), rotations_quat.values())) for x in co])
 
                             fc.update()
+                for cameraCtrl in anim.cameraControllers:
+                    bone = None
+                    cameraCtrl: cameraController
+                    ccsAnmObj = ccsf.chunks[cameraCtrl.cameraIndex]
+                    target_bone = ccsAnmObj.name
+
+                    if ccsAnmObj.name.find(source) != -1:
+                        target_bone = ccsAnmObj.name.replace(source, target)
+
+                    camera = bpy.context.scene.camera
+
+                    group_name = action.groups.new(name = camera.name).name
+
+                    camera_path = f'pose.objects["{group_name}"]'
+
+                    locations = {}
+                    for frame, loc in cameraCtrl.positions.items():
+
+                        #positions
+                        loc = Vector(loc)
+                        loc.rotate(brot)
+                        bind_loc = Vector(bloc)
+                        bind_loc.rotate(brot)
+
+                        final_loc = (loc * 0.01) - bind_loc
+
+                        locations[frame] = final_loc
+                    
+                    data_path = f'"Camera".{"location"}'
+                    if len(locations):
+                        for i in range(3):
+                            fc = action.fcurves.new(data_path=data_path, index=i, action_group=group_name)
+                            fc.keyframe_points.add(len(cameraCtrl.positions.keys()))
+                            fc.keyframe_points.foreach_set('co', [x for co in list(map(lambda f, v: (f, v[i]), objCtrl.positions.keys(), locations.values())) for x in co])
+
+                            fc.update()
+
+
 
     def makeMaterial(self, model, mesh):
         mat = bpy.data.materials.get(f'{model.name}_{mesh.material.name}')

@@ -8,6 +8,7 @@ class ccsAnimation(BrStruct):
         self.type = "Animation"
         self.path = ''
         self.objectControllers = []
+        self.cameraControllers = []
     def __br_read__(self, br: BinaryReader, indexTable, version):
         self.index = br.read_uint32()
         self.name = indexTable.Names[self.index][0]
@@ -32,6 +33,10 @@ class ccsAnimation(BrStruct):
                 objectCtrl = br.read_struct(objectController, None, currentFrame)
                 self.objectControllers.append(objectCtrl)
 
+            elif chunkType == CCSTypes.CameraController:
+                cameraCtrl = br.read_struct(cameraController, None, currentFrame)
+                self.cameraControllers.append(cameraCtrl)
+
             else:
                 chunkData = br.read_bytes(chunkSize * 4)
                 #self.frames.append((chunkType, chunkData))
@@ -39,6 +44,8 @@ class ccsAnimation(BrStruct):
     def finalize(self, chunks):
         for objectCtrl in self.objectControllers:
             objectCtrl.finalize(chunks)
+        for cameraCtrl in self.cameraControllers:
+            cameraCtrl.finalize(chunks)    
 
 
 class objectController(BrStruct):
@@ -59,7 +66,7 @@ class objectController(BrStruct):
         self.opacity = readOpacity(br, self.opacity, self.ctrlFlags >> 9, currentFrame)
     
     def finalize(self, chunks):
-        self.object = chunks[self.objectIndex]
+        self.object = chunks[self.objectIndex]   
 
 
 '''def readPosition(br: BinaryReader, positions, ctrlFlags, currentFrame):
@@ -94,6 +101,22 @@ class objectController(BrStruct):
     
     return positions'''
 
+class cameraController(BrStruct):
+    def __init__(self):
+        self.camera = None
+        self.positions = {}
+        self.rotations = {}
+        self.zoom = {}
+    def __br_read__(self, br: BinaryReader, currentFrame):
+        self.cameraIndex = br.read_uint32()
+        self.frame = br.read_uint32()
+        cuframe = self.frame
+        self.positions = readCamPosition(br, self.positions, cuframe)
+        self.rotations = readCamRotation(br, self.rotations, cuframe)
+        self.zoom = readZoom(br, self.zoom, cuframe)
+    
+    def finalize(self, chunks):
+        self.camera = chunks[self.cameraIndex]    
 
 def readPosition(br: BinaryReader, positions, ctrlFlags, currentFrame):
     if ctrlFlags & 7 == 2:
@@ -118,6 +141,31 @@ def readPosition(br: BinaryReader, positions, ctrlFlags, currentFrame):
         positions[currentFrame] = position
     
     return positions
+
+def readCamPosition(br: BinaryReader, positions, cuframe):
+    posX = br.read_float()
+    posY = br.read_float()        
+    posZ = br.read_float()
+
+    positions[cuframe] = (posX, posY, posZ)
+    
+    return positions
+
+def readCamRotation(br: BinaryReader, rotations, cuframe):
+    rotX = br.read_float()
+    rotY = br.read_float()        
+    rotZ = br.read_float()
+
+    rotations[cuframe] = (rotX, rotY, rotZ)
+    
+    return rotations
+
+def readZoom(br: BinaryReader, zooms, cuframe):
+    zoom = br.read_float()
+
+    zooms[cuframe] = (zoom)
+    
+    return zooms
 
 
 def readRotationEuler(br: BinaryReader, rotations, ctrlFlags, currentFrame):
