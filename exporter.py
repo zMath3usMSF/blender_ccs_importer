@@ -277,7 +277,7 @@ class CCS_IMPORTER_OT_EXPORT(Operator, ExportHelper):
         # Pega os fcurves do slot do armature correto
         fcurves = None
         for slot in action.slots:
-            if slot.name_display == blender_model.name:  # "CMP_1nrw00t0 trall"
+            if slot.name_display == blender_model.name:  # "CMP_1nrw00t0 trall" #
                 for layer in action.layers:
                     for strip in layer.strips:
                         for channelbag in strip.channelbags:
