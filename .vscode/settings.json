@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./fake_bpy_modules_4.4-20260128"
+    ]
+}

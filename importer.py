@@ -1,0 +1,2192 @@
+import bpy, bmesh, math, mathutils
+from bpy.types import PropertyGroup, Operator, Panel
+from bpy.props import StringProperty, BoolProperty, EnumProperty, PointerProperty, CollectionProperty, IntProperty
+from .ccs_lib.ccs import *
+from mathutils import Vector, Matrix, Euler, Quaternion
+from math import radians
+import numpy as np
+from time import perf_counter, time
+from bpy_extras.io_utils import ImportHelper
+from .ccs_lib.ccsAnimation import *
+from .ccs_lib.ccsStream import *
+import os, zlib
+import cProfile
+import pstats
+
+class ccsObjectProperties(bpy.types.PropertyGroup):
+    name: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    path: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    parent: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    clump: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    model: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    shadow: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+    layer: StringProperty(
+        name="",
+        default=""
+    ) # type: ignore
+
+
+class ccsPropertyGroup(bpy.types.PropertyGroup):
+    objects: CollectionProperty(type= ccsObjectProperties) # type: ignore
+    
+    def add_object(self, chunk, clumpName):
+        blenderChunk = bpy.context.scene.ccs_importer.objects.get(chunk.name, self.objects.add())
+        blenderChunk.name = chunk.name
+        blenderChunk.path = chunk.path
+        blenderChunk.parent = chunk.parent.name if chunk.parent else ""
+        blenderChunk.clump = clumpName
+
+
+class CCS_IMPORTER_OT_IMPORT(bpy.types.Operator, ImportHelper):
+    bl_label = "Import CCS"
+    bl_idname = "import_scene.ccs"
+
+
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement, options={'HIDDEN', 'SKIP_SAVE'}) # type: ignore
+    directory: StringProperty(subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'}) # type: ignore
+    filter_glob: StringProperty(default="*.ccs", options={"HIDDEN"}) # type: ignore
+    filename_ext = ".ccs"
+    filepath: StringProperty(subtype='FILE_PATH') # type: ignore
+
+    swap_names: BoolProperty(name = "Swap Character Code", default = False) # type: ignore
+    source_name: StringProperty(name= "Source Name") # type: ignore
+    target_name: StringProperty(name = "Target Name") # type: ignore
+    use_target_skeleton: BoolProperty(name = "Select a target skeleton") #type: ignore
+    target_skeleton: StringProperty(name = "Target Armature") #type: ignore
+    slice_name: BoolProperty(name = "Slice Names", default = False) #type: ignore
+    slice_count: IntProperty(name = "Slice Count", default = 0) #type: ignore
+    import_shadow: BoolProperty(name = "Import Shadow Meshes", default = False) #type: ignore
+    find_missing_chunks: BoolProperty(name = "Find Missing Chunks", default = False) #type: ignore
+    import_models: BoolProperty(name = "Import Models", default = True) #type: ignore
+    import_animations: BoolProperty(name = "Import Animations", default = True) #type: ignore
+    import_morphs: BoolProperty(name = "Import Morphs", default = True) #type: ignore
+    import_cameras: BoolProperty(name = "Import Cameras", default = True) #type: ignore
+    import_all_textures: BoolProperty(name = "Import All textures", default = True) #type: ignore
+    import_stream: BoolProperty(name = "Import Scenes (Stream Chunks)", default = True) #type: ignore
+    import_lights: BoolProperty(name = "Import Lights", default = True) #type: ignore
+    import_effects: BoolProperty(name = "Import Effects", default = True) #type: ignore
+    effects_track_camera: BoolProperty(name = "Effects tack to (Deafult_Camera)", default = False) #type: ignore
+    import_hitMesh: BoolProperty(name = "Import Hit Meshes", default = True) #type: ignore
+
+    
+    def execute(self, context):
+
+        start_time = time()
+        '''profiler = cProfile.Profile()
+        profiler.enable()'''
+
+        ccsFiles = []
+
+        if self.find_missing_chunks:
+
+            for file in self.files:
+                
+                self.filepath = os.path.join(self.directory, file.name)
+
+                ccsf = readCCS(self.filepath)
+
+                ccsFiles.append(ccsf)
+            
+            ccsf1 = ccsFiles[0]
+
+            all_chunks = {}
+
+            for ccs in ccsFiles[1:]:
+                for asset in ccs.assets.keys():
+                    if not asset.startswith("#"):
+                        for chunk in ccs.assets[asset]:
+                            all_chunks[chunk.name] = chunk
+            
+            for ext in ccsf1.sortedChunks["ExternalObject"]:
+                extObjName = ext.referencedObjectName[0]
+                if extObjName in all_chunks:
+                    ext.object = all_chunks[extObjName]
+            
+            importer = importCCS(self, self.filepath, self.as_keywords(ignore=("filter_glob",)), ccsf1)
+
+            importer.read(context)
+        else:
+            for file in self.files:
+                
+                self.filepath = os.path.join(self.directory, file.name)
+
+                ccsf = readCCS(self.filepath)
+
+                importer = importCCS(self, self.filepath, self.as_keywords(ignore=("filter_glob",)), ccsf)
+
+                importer.read(context)
+
+        #profiler.disable()
+        elapsed_s = "{:.2f}s".format(time() - start_time)
+        self.report({'INFO'}, "CCS files imported in " + elapsed_s)
+        
+        #profile results
+        '''stats = pstats.Stats(profiler)
+        stats.strip_dirs()
+        stats.sort_stats('cumtime')
+        stats.print_stats()'''
+
+        return {'FINISHED'}
+
+    def draw(self, context):
+        layout = self.layout
+
+        row = layout.row()
+        row.prop(self, "import_models")
+        row = layout.row()
+        row.prop(self, "import_animations")
+
+        if self.import_animations:
+            row = layout.row()
+            row.prop(self, "import_morphs")
+        
+        row = layout.row()
+        row.prop(self, "import_effects")
+        
+        if self.import_effects:
+            row = layout.row()
+            row.prop(self, "effects_track_camera")
+        
+        row = layout.row()
+        row.prop(self, "import_cameras")
+        row = layout.row()
+        row.prop(self, "import_all_textures")
+        row = layout.row()
+        row.prop(self, "import_stream")
+        row = layout.row()
+        row.prop(self, "import_lights")
+        
+        row = layout.row()
+        row.prop(self, "import_shadow")
+        row = layout.row()
+        row.prop(self, "import_hitMesh")
+        
+
+        row = layout.row()
+        row.prop(self, "swap_names")
+        row = layout.row()
+        if self.swap_names:
+            row.prop(self, "source_name")
+            row = layout.row()
+            row.prop(self, "target_name")
+        
+        
+        row = layout.row()
+        row.prop(self, "use_target_skeleton")
+        if self.use_target_skeleton:
+            row = layout.row()
+            row.prop_search(self, "target_skeleton", bpy.data, "armatures")
+
+        source_example = f"OBJ_{self.source_name}00t0 trall"
+        target_example = f"OBJ_{self.target_name}00t0 trall"
+
+        row = layout.row()
+        row.prop(self, "slice_name")
+        if self.slice_name:
+            row.prop(self, "slice_count")
+        
+
+        if self.swap_names:
+            row = layout.row()
+            row.label(text = f"Old name example: {source_example[self.slice_count:]}")
+            row = layout.row()
+            row.label(text = f"New name example: {target_example[self.slice_count:]}")
+        
+        row = layout.row()
+        row.prop(self, "find_missing_chunks")
+
+
+            
+
+class DropCCS(Operator):
+    """Allows CCS files to be dropped into the viewport to import them"""
+    bl_idname = "import_scene.drop_ccs"
+    bl_label = "Import CCS"
+
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement, options={'HIDDEN', 'SKIP_SAVE'}) # type: ignore
+    directory: StringProperty(subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'}) # type: ignore
+    filter_glob: StringProperty(default="*.ccs", options={"HIDDEN"}) # type: ignore
+    index: IntProperty(name="Index") # type: ignore
+    swap_names: BoolProperty(name = "Swap Character Code", default = False) # type: ignore
+    source_name: StringProperty(name= "Source Name") # type: ignore
+    target_name: StringProperty(name = "Target Name") # type: ignore
+    use_target_skeleton: BoolProperty(name = "Select a target skeleton") #type: ignore
+    target_skeleton: StringProperty(name = "Target Armature") #type: ignore
+    slice_name: BoolProperty(name = "Slice Names", default = False) #type: ignore
+    slice_count: IntProperty(name = "Slice Count", default = 0) #type: ignore
+    import_shadow: BoolProperty(name = "Import Shadow Meshes", default = False) #type: ignore
+    find_missing_chunks: BoolProperty(name = "Find Missing Chunks", default = False) #type: ignore
+    import_models: BoolProperty(name = "Import Models", default = True) #type: ignore
+    import_animations: BoolProperty(name = "Import Animations", default = True) #type: ignore
+    import_morphs: BoolProperty(name = "Import Morphs", default = True) #type: ignore
+    import_cameras: BoolProperty(name = "Import Cameras", default = True) #type: ignore
+    import_all_textures: BoolProperty(name = "Import All textures", default = True) #type: ignore
+    import_stream: BoolProperty(name = "Import Scenes (Stream Chunks)", default = True) #type: ignore
+    import_lights: BoolProperty(name = "Import Lights", default = True) #type: ignore
+    import_effects: BoolProperty(name = "Import Effects", default = True) #type: ignore
+    effects_track_camera: BoolProperty(name = "Effects tack to (Deafult_Camera)", default = False) #type: ignore
+    import_hitMesh: BoolProperty(name = "Import Hit Meshes", default = True) #type: ignore
+
+    
+    def execute(self, context):
+
+        start_time = time()
+
+        ccsFiles = []
+
+        if self.find_missing_chunks:
+
+            for file in self.files:
+                
+                self.filepath = os.path.join(self.directory, file.name)
+
+                ccsf = readCCS(self.filepath)
+
+                ccsFiles.append(ccsf)
+            
+            ccsf1 = ccsFiles[0]
+
+            all_chunks = {}
+
+            for ccs in ccsFiles[1:]:
+                for asset in ccs.assets.keys():
+                    if not asset.startswith("#"):
+                        for chunk in ccs.assets[asset]:
+                            all_chunks[chunk.name] = chunk
+            
+            for ext in ccsf1.sortedChunks["ExternalObject"]:
+                extObjName = ext.referencedObjectName[0]
+                if extObjName in all_chunks:
+                    ext.object = all_chunks[extObjName]
+            
+            importer = importCCS(self, self.filepath, self.as_keywords(ignore=("filter_glob",)), ccsf1)
+
+            importer.read(context)
+        else:
+            for file in self.files:
+                
+                self.filepath = os.path.join(self.directory, file.name)
+
+                ccsf = readCCS(self.filepath)
+
+                importer = importCCS(self, self.filepath, self.as_keywords(ignore=("filter_glob",)), ccsf)
+
+                importer.read(context)
+
+
+        elapsed_s = "{:.2f}s".format(time() - start_time)
+        self.report({'INFO'}, "CCS files imported in " + elapsed_s)
+
+        return {'FINISHED'}
+
+
+class CCS_FH_import(bpy.types.FileHandler):
+    bl_idname = "CCS_FH_import"
+    bl_label = "File handler for CCS files"
+    bl_import_operator = "import_scene.drop_ccs"
+    bl_file_extensions = ".ccs"
+
+    @classmethod
+    def poll_drop(cls, context):
+        return (context.area and context.area.type == 'VIEW_3D')
+    
+    def draw():
+        pass
+
+
+class importCCS:
+    def __init__(self, operator: Operator, filepath, import_settings: dict, ccsfile):
+        self.operator = operator
+        self.filepath = filepath
+        for key, value in import_settings.items():
+            setattr(self, key, value)
+        
+        self.ccsf: ccsFile = ccsfile
+        
+
+    def read(self, context):
+        
+        self.collection = bpy.data.collections.new(self.ccsf.name)
+        self.emptiesCollection = bpy.data.collections.new(f"{self.ccsf.name} Empties")
+        bpy.context.collection.children.link(self.collection)
+        self.collection.children.link(self.emptiesCollection)
+        
+        
+        if not bpy.data.collections.get("CCS Scene Manager"):
+            ccs_manager_collection = bpy.data.collections.new("CCS Scene Manager")
+            bpy.context.collection.children.link(ccs_manager_collection)
+        else:
+            ccs_manager_collection = bpy.data.collections.get("CCS Scene Manager")
+        
+        if not bpy.data.objects.get("CCS Scene Manager"):
+            #create an empty object for CCS Scene Manager
+            ccs_manager = bpy.data.objects.new("CCS Scene Manager", None)
+            ccs_manager.empty_display_size = 0.01
+            ccs_manager_collection.objects.link(ccs_manager)
+        else:
+            ccs_manager = bpy.data.objects.get("CCS Scene Manager")
+        
+
+        #clumps
+        for cmpChunk in self.ccsf.sortedChunks["Clump"]:
+            if bpy.data.armatures.get(cmpChunk.name):
+                cmpChunk: ccsClump
+                armature = bpy.data.armatures.get(cmpChunk.name)
+                if len(cmpChunk.bones) > len(armature.bones):
+                    self.updateClump(cmpChunk, armature)
+            else:
+                self.makeClump(cmpChunk)
+        
+        if self.import_all_textures:
+            for tex in self.ccsf.sortedChunks["Texture"]:
+                if not bpy.data.images.get(tex.name) and tex.textureData:
+                    texture = tex.convertTexture()
+
+                    img = bpy.data.images.new(tex.name, tex.width, tex.height, alpha=True)
+                    img.pack(data=bytes(texture), data_len=len(texture))
+                    img.source = 'FILE'
+
+        
+        if self.import_models:
+            #objects
+            for objChunk in self.ccsf.sortedChunks["Object"]:
+                bObject = bpy.data.objects.new(objChunk.name, None)
+                bObject.empty_display_size = 0.01
+                self.emptiesCollection.objects.link(bObject)
+                objectClump = bpy.data.objects.get(objChunk.clump.name) if objChunk.clump else None
+                if objectClump:
+                    #bObject.parent = objectClump
+                    bObject["clump"] = objChunk.clump.name
+                
+                    if objChunk.parent:
+                        #bObject.parent_type = "BONE"
+                        #bObject.parent_bone = objChunk.parent.name
+                        bObject["parent"] = objChunk.parent.name
+                
+                if objChunk.model:
+                    bObject["model"] = objChunk.model.name
+                    self.makeModels(objChunk.model, objChunk.clump, objChunk.name)
+                
+                if objChunk.shadow:
+                    bObject["shadow"] = objChunk.model.name
+                    self.makeModels(objChunk.shadow, objChunk.clump, objChunk.name)
+
+
+            #External Objects/ References
+            for extChunk in self.ccsf.sortedChunks["ExternalObject"]:
+                existRefObject = bpy.data.objects.get(extChunk.name)
+                if not existRefObject:
+                    bObject = bpy.data.objects.new(extChunk.name, None)
+                    bObject.empty_display_size = 0.01
+                    self.emptiesCollection.objects.link(bObject)
+                    refObjectClump = bpy.data.objects.get(extChunk.clump.name) if extChunk.clump else None
+                    if refObjectClump:
+                        #bObject.parent = refObjectClump
+                        bObject["clump"] = extChunk.clump.name
+
+                        if extChunk.parent:
+                            #bObject.parent_type = "BONE"
+                            #bObject.parent_bone = extChunk.parent.name if extChunk.parent else ""
+                            bObject["parent"] = extChunk.parent.name
+
+                    if extChunk.object:
+                        #check if the object exist in blender
+                        existing_object = bpy.data.objects.get(extChunk.object.name)
+                        if existing_object: 
+                            existingObjectModel = existing_object.get("Model")
+                            bObject["model"] = existingObjectModel if existingObjectModel else None
+                        else:
+                            bObject["model"] = extChunk.name.replace("OBJ_", "MDL_")
+                        
+                        if extChunk.clump:
+                            '''if extChunk.object.model.name.startswith("MDL_1skw00t0 body"):
+                                breakpoint()'''
+                            self.makeModels(extChunk.object.model, extChunk.clump, extChunk.name)
+
+        
+        if self.import_effects:
+            #Effects
+            for effChunk in self.ccsf.sortedChunks["Effect"]:
+                effectClump = bpy.data.objects.get(effChunk.clump.name) if effChunk.clump else None      
+                if not effectClump:
+                    if effChunk.AnmObject.parent.type == "ExternalObject":
+                        #for extChunk in self.ccsf.sortedChunks["ExternalObject"]:
+                        for objChunk in self.ccsf.sortedChunks["Object"]:
+                            if effChunk.AnmObject.parent.name == objChunk.name:
+                                if effChunk.model:
+                                    self.makeEffects(effChunk.model, None, objChunk.clump, objChunk.name)
+                
+                #if not effChunk.model:
+                    #continue
+                else:
+                    self.makeEffects(effChunk.model, effChunk.clump, None, effChunk.name)
+                        #print(f'import | Perant.bone {effChunk.name}')
+                        
+                           
+                if self.import_animations and effChunk.model:
+                    frames = effChunk.frameCount
+                    #print(f'frameCount {frames}')
+                    if frames:
+                        self.makeEffectAction(effChunk)
+      
+
+        if self.import_morphs:
+            #morph chunks
+            for morph in self.ccsf.sortedChunks["Morph"]:
+                morph: ccsMorph
+                morphModel = bpy.data.objects.get(morph.targetName)
+
+                if morphModel:
+                    morphModel.shape_key_add(name = "Basis")
+
+        if self.import_cameras:
+            #Cameras
+            for cam in self.ccsf.sortedChunks["Camera"]:
+                bCamera = bpy.data.cameras.get(cam.name)
+                if not bCamera:
+                    bCamera = bpy.data.cameras.new(cam.name)
+                    cameraObject = bpy.data.objects.new(cam.name, bCamera)
+                    self.collection.objects.link(cameraObject)
+
+        if self.import_lights:
+            # Distant Lights
+            for light in self.ccsf.sortedChunks["Light"]:
+                bLight = bpy.data.lights.get(light.name)
+                if not bLight:
+                    #check the light type
+                    if light.lightType.value == 1:
+                        bLight = bpy.data.objects.new(light.name, None)
+                        bLight.empty_display_type = 'SINGLE_ARROW'
+                        bLight.empty_display_size = 2
+                        bLight.scale = (-1, -1, -1)
+                        #set this object as the light direction object
+                        ccs_manager["lightdir_object"] = bLight
+                        
+                        lightObject = bLight
+
+                        
+                    elif light.lightType.value == 2:
+                        bLight = bpy.data.lights.new(name = light.name, type = 'AREA')
+                        lightObject = bpy.data.objects.new(light.name, bLight)
+                    elif light.lightType.value == 3:
+                        bLight = bpy.data.lights.new(name = light.name, type = 'SPOT')
+                        lightObject = bpy.data.objects.new(light.name, bLight)
+                    elif light.lightType.value == 4:
+                        bLight = bpy.data.objects.new(light.name, None)
+                        bLight.empty_display_type = 'SPHERE'
+                        bLight.empty_display_size = 0.5
+                        
+                        #set this object as the light point object
+                        ccs_manager["lightpoint_object"] = bLight
+
+                    
+                        lightObject = bLight
+                    self.collection.objects.link(lightObject)
+
+
+        if self.import_hitMesh:
+            # Hit Models
+            for hitChunk in self.ccsf.sortedChunks["HitModel"]:
+                hit_name = hitChunk.name
+                print(f'hitChunk.name {hit_name}')
+                for i, mesh in enumerate(hitChunk.hitMeshes):
+                    tri_count = mesh.vertexCount // 3
+
+                    # verticesSet1
+                    bm = bmesh.new()
+                    verts1 = [bm.verts.new((v.X, v.Y, v.Z)) for v in mesh.verticesSet1]
+                    #print(f'mesh.verticesSet1 {mesh.verticesSet1}')
+                    bm.verts.ensure_lookup_table()
+
+                    for tri in range(tri_count):
+                        v = tri * 3
+                        bm.faces.new((verts1[v + 0], verts1[v + 1], verts1[v + 2]))
+
+                    bm.faces.ensure_lookup_table()                       
+
+                    blender_mesh = bpy.data.meshes.new(f'{hit_name}_{i}_set1')
+                    bm.to_mesh(blender_mesh)
+
+                    obj = bpy.data.objects.new(f'{hit_name}_{i}_set1', blender_mesh)
+                    self.collection.objects.link(obj)
+
+                    '''
+                    # verticesSet2
+                    bm = bmesh.new()
+                    verts2 = [bm.verts.new((v.X, v.Y, v.Z)) for v in mesh.verticesSet2]
+                    #print(f'mesh.verticesSet2 {mesh.verticesSet2}')
+                    bm.verts.ensure_lookup_table()
+
+                    for tri in range(tri_count):
+                        v = tri * 3
+                        bm.faces.new((verts2[v + 0], verts2[v + 1], verts2[v + 2]))
+
+                    bm.faces.ensure_lookup_table()                       
+
+                    blender_mesh = bpy.data.meshes.new(f'{hit_name}_{i}_set2')
+                    bm.to_mesh(blender_mesh)
+
+                    obj = bpy.data.objects.new(f'{hit_name}_{i}_set2', blender_mesh)
+                    self.collection.objects.link(obj)
+                    '''
+
+
+        if self.import_animations:
+            #Animations
+            for anm in self.ccsf.sortedChunks["Animation"]:
+                #print(f'anm.name {anm.name}')
+                self.makeAction(anm)
+        
+        if self.import_stream:
+            #Stream Chunk / Frame Chunk / Scene
+            streamChunk: ccsStream = self.ccsf.stream
+            if streamChunk.frameCount > 1:
+                self.makeAction(streamChunk)
+
+
+    def makeEffects(self, model, effClump, objClump, parentBone):
+        
+        #create camera for effects camera helper
+        if self.effects_track_camera:
+            self.makeEffCamera()
+        
+        model_name = model.name
+        bm = bmesh.new()
+        uv_layer = bm.loops.layers.uv.new(f"UV")
+        #vgroup_layer = bm.verts.layers.deform.new("Weights")
+        color_layer = bm.loops.layers.color.new(f"Color")
+        direction = 1
+        
+        blender_mesh = bpy.data.meshes.new(f'{model_name}')
+        obj = bpy.data.objects.new(f'{model_name}', blender_mesh)
+
+        if effClump:
+            #find the armature and add all the bones to a dict
+            armature = bpy.data.objects.get(effClump.name)
+            #print(f'armature {armature}')
+            obj.parent = armature
+            bone_indices = {}
+            for i in range(len(armature.pose.bones)):
+                obj.vertex_groups.new(name = armature.pose.bones[i].name)
+                bone_indices[armature.pose.bones[i].name] = i
+                #print(f'bone_indices {armature.pose.bones[i].name}')
+
+            #get bone matrix
+            '''for b in effClump.bones.values():
+                if b.name == parentBone:
+                    vertex_matrix = Matrix(b.matrix)'''
+                    #print(f'vertex_matrix {vertex_matrix}') 
+            
+            for i, v in enumerate(model.mesh.vertices):
+                #print(f'vertex_matrix {vertex_matrix} @ vp {v.position}') 
+                #vp = vertex_matrix @ Vector(v.position)
+                vp = v.position
+                bmVertex = bm.verts.new(vp)   
+        else:
+            armature = bpy.data.objects.get(objClump.name)
+            constraint = obj.constraints.new(type='CHILD_OF')
+            constraint.name = f'{parentBone}'
+            constraint.target = armature
+            constraint.subtarget = parentBone
+            
+            for i, v in enumerate(model.mesh.vertices):
+                bmVertex = bm.verts.new(v.position)
+        
+        #create effects cam helper constraint
+        if self.effects_track_camera:
+             #self.makeEffCamConstraint(obj, helper)
+             self.makeEffCamConstraint(obj)
+        
+        bm.verts.ensure_lookup_table()
+        bm.verts.index_update()
+
+        for i in range(2):
+            if direction == 1:
+                face = bm.faces.new((bm.verts[i-2], bm.verts[i], bm.verts[i-1]))
+                triUV1 = model.mesh.vertices[i-2].UV
+                triUV2 = model.mesh.vertices[i].UV
+                triUV3 = model.mesh.vertices[i-1].UV
+            else:
+                face = bm.faces.new((bm.verts[i-2], bm.verts[i-1], bm.verts[i]))
+                triUV1 = model.mesh.vertices[i-2].UV
+                triUV2 = model.mesh.vertices[i-1].UV
+                triUV3 = model.mesh.vertices[i].UV
+
+            face.loops[0][uv_layer].uv = triUV1
+            face.loops[1][uv_layer].uv = triUV2
+            face.loops[2][uv_layer].uv = triUV3
+                    
+            face.loops[0][color_layer] = 1, 1, 1, 1
+            face.loops[1][color_layer] = 1, 1, 1, 1
+            face.loops[2][color_layer] = 1, 1, 1, 1
+            
+            face.smooth = True
+            direction *= -1
+            
+        bm.faces.ensure_lookup_table()
+        bm.to_mesh(blender_mesh)
+
+        obj["emissive"] = 0.0
+        obj["invert_colors"] = 0.0
+        obj["opacity"] = 1.0
+        if model.matFlags1 & 1:
+            obj["emissive"] = 1.0
+        elif model.matFlags1 & 2:
+            obj["emissive"] = 1.0
+            obj["invert_colors"] = 1.0
+            
+        mat = self.makeMaterial(model, model.mesh)
+        if obj["emissive"]:
+            mat.surface_render_method = 'BLENDED'
+            mat.use_transparency_overlap = True
+        mat_slot = obj.material_slots.get(mat.name)
+        #print(f'mat{mat}, mat_slot {mat_slot}')
+        if mat_slot:
+            matIndex = mat_slot.slot_index
+        else:
+            obj.data.materials.append(mat)
+            mat_slot = obj.material_slots.get(mat.name)
+            matIndex = mat_slot.slot_index
+
+        self.collection.objects.link(obj)
+
+
+    def makeModels(self, model, clump, parentBone):
+        model_name =  parentBone.replace("OBJ_", "MDL_")
+        if model == None or model.type != 'Model':
+            return
+
+        if model.modelType & 8 and self.import_shadow:
+            shadow_name = model.name
+            for i, mesh in enumerate(model.meshes):
+                bm = bmesh.new()
+
+                verts = [bm.verts.new(v) for v in mesh.vertices]
+                bm.verts.ensure_lookup_table()
+                
+                triangles = [bm.faces.new((verts[t[0]], verts[t[1]], verts[t[2]])) for t in mesh.triangles]
+                bm.faces.ensure_lookup_table()                        
+
+                blender_mesh = bpy.data.meshes.new(f'{shadow_name}')
+                bm.to_mesh(blender_mesh)
+
+                obj = bpy.data.objects.new(f'{shadow_name}', blender_mesh)
+                self.collection.objects.link(obj)
+        
+
+        elif model.meshCount > 0 and model.modelType & 4 and not model.modelType & 2:
+            #Create the object and its mesh data
+            meshdata = bpy.data.meshes.new(f'{model_name}')
+            obj = bpy.data.objects.new(f'{model_name}', meshdata)
+            obj["emissive"] = 0.0
+            obj["invert_colors"] = 0.0
+            obj["opacity"] = 1.0
+            if model.matFlags1 & 1:
+                obj["emissive"] = 1.0
+            elif model.matFlags1 & 2:
+                obj["emissive"] = 1.0
+                obj["invert_colors"] = 1.0
+            
+            #find the armature and add all the bones to a dict
+            armature = bpy.data.objects.get(clump.name)
+            bone_indices = {}
+            for i in range(len(armature.pose.bones)):
+                obj.vertex_groups.new(name = armature.pose.bones[i].name)
+                bone_indices[armature.pose.bones[i].name] = i
+            
+            # check the clump for external bones and update the lookup names
+            lookupNames = model.lookuplistnames.copy()
+            if lookupNames:
+                for bone in clump.bones.values():
+                    ext_object = bone.object
+                    if ext_object and ext_object.type == "ExternalObject":
+                        real_object = ext_object.object
+                        if real_object and real_object.name in lookupNames:
+                            #update the lookup name to the real object name
+                            index = lookupNames.index(real_object.name)
+                            lookupNames[index] = bone.name
+
+            normals = []
+            vCount = 0
+            bm = bmesh.new()
+            vgroup_layer = bm.verts.layers.deform.new("Weights")
+            uv_layer = bm.loops.layers.uv.new(f"UV")
+            color_layer = bm.loops.layers.color.new(f"Color")
+
+            for mesh in model.meshes:
+                
+                #add the mesh material
+                mat = self.makeMaterial(model, mesh)
+                mat_slot = obj.material_slots.get(mat.name)
+                if obj["emissive"]:
+                        mat.surface_render_method = 'BLENDED'
+                        mat.use_transparency_overlap = True
+                if mat_slot:
+                    matIndex = mat_slot.slot_index
+                else:
+                    obj.data.materials.append(mat)
+                    mat_slot = obj.material_slots.get(mat.name)
+                    matIndex = mat_slot.slot_index
+
+                #meshdata = self.makeMeshSingleWeight(meshdata, mesh, parent, bone_indices, matIndex, normals) 
+                self.makeMeshMultiWeight(bm, model, mesh, bone_indices, lookupNames, matIndex, normals, clump, vgroup_layer, uv_layer, color_layer, vCount)                       
+                vCount = len(bm.verts)
+            
+            bm.to_mesh(meshdata)
+            bm.free()
+            
+            meshdata.normals_split_custom_set_from_vertices(normals)
+
+            self.collection.objects.link(obj)
+            obj.parent = armature
+
+            #add armature modifier
+            armature_modifier = obj.modifiers.new(name = f'{armature.name}', type = 'ARMATURE')
+            armature_modifier.object = armature
+
+        elif model.meshCount > 0 and model.modelType & 2:
+                for mesh in model.meshes:
+                    meshdata = bpy.data.meshes.new(f'{model_name}')
+                    obj = bpy.data.objects.new(f'{model_name}', meshdata)
+                    obj["emissive"] = 0.0
+                    obj["invert_colors"] = 0.0
+                    obj["opacity"] = 1.0
+                    if model.matFlags1 & 1:
+                        obj["emissive"] = 1.0
+                    elif model.matFlags1 & 2:
+                        obj["emissive"] = 1.0
+                        obj["invert_colors"] = 1.0
+
+                    bone_indices = {}
+                    parent_clump = bpy.data.objects.get(clump.name)
+                    for i in range(len(parent_clump.pose.bones)):
+                        obj.vertex_groups.new(name = parent_clump.pose.bones[i].name)
+                        bone_indices[parent_clump.pose.bones[i].name] = i
+
+                    meshdata = self.makeMeshTriList(meshdata, model, mesh, bone_indices, parent_clump)
+
+                    #add the mesh material
+                    mat = self.makeMaterial(model, mesh)
+                    if obj["emissive"]:
+                        mat.surface_render_method = 'BLENDED'
+                        mat.use_transparency_overlap = True
+                    obj.data.materials.append(mat)
+
+                    if model.clump:
+                        clump = bpy.data.objects.get(model.clump.name)
+                        parent = clump.pose.bones.get(model.parentBone.name)
+                        if parent:
+                            meshdata.transform(parent.matrix)
+
+                        obj.parent = clump
+                        
+                #add armature modifier
+                armature_modifier = obj.modifiers.new(name = f'{parent_clump.name}', type = 'ARMATURE')
+                armature_modifier.object = parent_clump
+                self.collection.objects.link(obj)
+
+        else:
+            #single bone
+            if model.meshCount > 0 and model.modelType < 2:
+                #Create the object and its mesh data
+                meshdata = bpy.data.meshes.new(f'{model_name}')
+                obj = bpy.data.objects.new(f'{model_name}', meshdata)
+                obj["emissive"] = 0.0
+                obj["invert_colors"] = 0.0
+                obj["opacity"] = 1.0
+                if model.matFlags1 & 1:
+                    obj["emissive"] = 1.0
+                elif model.matFlags1 & 2:
+                    obj["emissive"] = 1.0
+                    obj["invert_colors"] = 1.0
+                
+                #find the armature and add all the bones to a dict
+                if hasattr(clump, "name"):
+                    
+                    armature = bpy.data.objects.get(clump.name)
+                    parent = armature.data.bones.get(parentBone)
+                    if not parent:
+                        parent = armature.data.bones[0]
+
+                    bone_indices = {}
+                    for i in range(len(armature.pose.bones)):
+                        obj.vertex_groups.new(name = armature.pose.bones[i].name)
+                        bone_indices[armature.pose.bones[i].name] = i
+                    
+                    normals = []
+                    bm = bmesh.new()
+                    uv_layer = bm.loops.layers.uv.new(f"UV")
+                    color_layer = bm.loops.layers.color.new(f"Color")
+                    vgroup_layer = bm.verts.layers.deform.new("Weights")
+                    vCount = 0
+                    
+                    for m, mesh in enumerate(model.meshes):
+                        #add the mesh material
+                        mat = self.makeMaterial(model, mesh)
+                        if obj["emissive"]:
+                            mat.surface_render_method = 'BLENDED'
+                            mat.use_transparency_overlap = True
+                        mat_slot = obj.material_slots.get(mat.name)
+                        if mat_slot:
+                            matIndex = mat_slot.slot_index
+                        else:
+                            obj.data.materials.append(mat)
+                            mat_slot = obj.material_slots.get(mat.name)
+                            matIndex = mat_slot.slot_index
+                        
+                        self.makeMeshSingleWeight(bm, mesh, parent, bone_indices, matIndex, normals, uv_layer, color_layer, vgroup_layer, vCount)
+                        vCount = len(bm.verts)
+                    
+                    bm.to_mesh(meshdata)
+                    
+                    meshdata.normals_split_custom_set_from_vertices(normals)
+
+                    obj.modifiers.new(name = 'Armature', type = 'ARMATURE')
+                    obj.modifiers['Armature'].object = armature
+                    #set the active color layer
+                    meshdata.vertex_colors.active = meshdata.vertex_colors[0]
+
+                    obj.parent = armature
+
+                    self.collection.objects.link(obj)
+
+
+    def makeMaterial(self, model, mesh):
+        ccs_material = mesh.material
+        if not ccs_material:
+            mat = bpy.data.materials.get("ccsMaterial").copy()
+            mat["uvOffset"] = [0, 0, 1, 1]
+            return mat
+        
+        materialName = ccs_material.name
+        
+        if "clut" in materialName.lower():
+            if ccs_material.alternativeName:
+                materialName = ccs_material.alternativeName.replace("CLT", "MAT")
+            else:
+                materialName = f"{model.name}_{materialName}"
+
+        mat = bpy.data.materials.get(materialName)
+        if not mat:
+            #check if ccsMaterial exists already
+            mat = bpy.data.materials.get("ccsMaterial")
+            
+
+            if not mat:
+                ccsMaterial_path = r"materials\ccsMaterial.blend"
+                importer_path = os.path.realpath(__file__)
+                dir_path = os.path.dirname(importer_path)
+
+                ccsMaterial_path = os.path.join(dir_path, ccsMaterial_path)
+                
+                with bpy.data.libraries.load(ccsMaterial_path) as (data_from, data_to):
+                    data_to.materials = ["ccsMaterial"]
+
+                mat = bpy.data.materials["ccsMaterial"].copy()
+            else:
+                mat = mat.copy()
+                mat["uvOffset"] = [0, 0, 1, 1]
+            
+            mat.name = materialName
+            
+            #we'll try to find the image if it exists already
+            tex = ccs_material.texture
+            img = None
+            if ccs_material.textureName:
+                img = bpy.data.images.get(ccs_material.textureName)
+            elif ccs_material.texture:
+                img = bpy.data.images.get(tex.name)
+            
+            
+            if not img and tex and isinstance(tex, ccsTexture) and tex.textureData:
+                texture = tex.convertTexture()
+
+                img = bpy.data.images.new(tex.name, tex.width, tex.height, alpha=True)
+                img.pack(data=bytes(texture), data_len=len(texture))
+                img.source = 'FILE'
+            
+            texture_node = mat.node_tree.nodes["ccsTexture"]
+            texture_node.image = img
+
+            mat["uvOffset"] = [ccs_material.offsetX, ccs_material.offsetY, ccs_material.scaleX, ccs_material.scaleY]
+        else:
+            mat["uvOffset"] = [ccs_material.offsetX, ccs_material.offsetY, ccs_material.scaleX, ccs_material.scaleY]
+        
+        #mat.use_backface_culling = True
+            
+        return mat
+
+
+    def makeMeshSingleWeight(self, bm, mesh_np, parent, boneIndices, matIndex,
+                                normals_out, uv_layer, color_layer, vgroup_layer, vCount):
+        pos0 = mesh_np.vertices["positions"]   # (V,3)
+        nrm0 = mesh_np.vertices["normals"]  # (V,3)
+        flags = mesh_np.vertices["triangleFlags"]        # (V,)
+        uvs   = mesh_np.vertices.get("UV", None)        # (V,2) or None
+        cols  = mesh_np.vertices.get("color", None)     # (V,4) u8 or None
+
+        # parent transform (rigid)
+        M4 = Matrix(parent["matrix"])
+        R3 = M4.to_3x3()
+
+        # vertex group index for this bone
+        boneID = boneIndices[parent.name]
+
+        # 1) Create verts (transform slot0 pos/nrm), set group weight=1, collect normals
+        bm_verts = [None] * pos0.shape[0]
+        for i in range(pos0.shape[0]):
+            vp = M4 @ Vector(pos0[i])
+            vn = R3 @ Vector(nrm0[i])
+
+            v = bm.verts.new(vp)
+            v[vgroup_layer][boneID] = 1.0
+
+            normals_out.append(vn.normalized())
+            bm_verts[i] = v
+
+        # 2) Build faces using triangleFlag strip logic
+        direction = 1
+        for i in range(2, pos0.shape[0]):
+            f = int(flags[i])
+            if f == 1:
+                direction = 1
+                continue
+            elif f == 2:
+                direction = -1
+                continue
+
+            # f == 0 ? emit triangle
+            idxs = (i-2, i-1, i) if direction == 1 else (i, i-1, i-2)
+            try:
+                face = bm.faces.new((bm_verts[idxs[0]], bm_verts[idxs[1]], bm_verts[idxs[2]]))
+            except ValueError:
+                face = None  # already exists; safe to skip
+
+            if face:
+                face.material_index = matIndex
+                face.smooth = True
+
+                # per-loop UV + color
+                if uv_layer is not None and uvs is not None:
+                    for loop, vi in zip(face.loops, idxs):
+                        loop[uv_layer].uv = uvs[vi]
+                if color_layer is not None and cols is not None:
+                    for loop, vi in zip(face.loops, idxs):
+                        c = cols[vi]  # uint8[4]
+                        loop[color_layer] = (c[0]/255.0, c[1]/255.0, c[2]/255.0, c[3]/255.0)
+
+                # flip for next face
+                direction *= -1
+
+
+    def makeMeshTriList(self, meshdata, model, mesh, bone_indices, parent_clump):
+        bm = bmesh.new()
+        uv_layer = bm.loops.layers.uv.new(f"UV")
+        vgroup_layer = bm.verts.layers.deform.new("Weights")
+        color_layer = bm.loops.layers.color.new(f"Color")
+
+        normals = []
+
+        bonesList = [b.name for b in parent_clump.data.bones]
+
+        for i, ccsVertex in enumerate(mesh.vertices):
+            #calculate vertex final position
+            vertex_matrix1 = parent_clump.data.bones[ccsVertex.boneIDs[0]]["matrix"]
+            vertex_matrix2 = parent_clump.data.bones[ccsVertex.boneIDs[1]]["matrix"]
+            
+            vp1 = (Matrix(vertex_matrix1) @ Vector(ccsVertex.positions[0]) * ccsVertex.weights[0]) 
+            vn1 = Matrix(vertex_matrix1).to_3x3() @ Vector(ccsVertex.normals[0])
+
+            vp2 = (Matrix(vertex_matrix2) @ Vector(ccsVertex.positions[1]) * ccsVertex.weights[1])
+
+            #if ccsVertex.boneIDs[1] != "":
+                #vp2 = (vertex_matrix2 @ Vector(ccsVertex.positions[1]) * ccsVertex.weights[1])
+                #vn2 = Vector(ccsVertex.normals[1])
+            #else:
+            #vp2 = Vector((0,0,0))
+            #vn2 = Vector((0,0,0))
+            
+
+            bmVertex = bm.verts.new(vp1 + vp2)
+
+            normals.append(vn1.normalized())   
+
+            bm.verts.ensure_lookup_table()
+            bm.verts.index_update()
+
+            #add vertex weights
+            boneID1 = bone_indices[bonesList[ccsVertex.boneIDs[0]]]
+            boneID2 = bone_indices[bonesList[ccsVertex.boneIDs[1]]]
+
+            if ccsVertex.weights[0] == 1:
+                    bmVertex[vgroup_layer][boneID1] = 1
+            else:
+                bmVertex[vgroup_layer][boneID1] = ccsVertex.weights[0]
+                bmVertex[vgroup_layer][boneID2] = ccsVertex.weights[1]
+            
+        for i in range(len(mesh.triangleIndices)):
+            flag = mesh.triangleFlags[i]
+            if flag == 0:
+                try:
+                    vert1 = mesh.triangleIndices[i-2]
+                    vert2 = mesh.triangleIndices[i-1]
+                    vert3 = mesh.triangleIndices[i]
+                    face = bm.faces.new((bm.verts[vert1], bm.verts[vert2], bm.verts[vert3]))
+                    face.smooth = True
+
+                    triUV1 = mesh.uvs[i-2]
+                    triUV2 = mesh.uvs[i-1]
+                    triUV3 = mesh.uvs[i]
+
+                    face.loops[0][uv_layer].uv = triUV1
+                    face.loops[1][uv_layer].uv = triUV2
+                    face.loops[2][uv_layer].uv = triUV3
+                    
+                    face.loops[0][color_layer] = 1, 1, 1, 1
+                    face.loops[1][color_layer] = 1, 1, 1, 1
+                    face.loops[2][color_layer] = 1, 1, 1, 1
+                except:
+                    print(f"error at {i}")
+
+            bm.faces.ensure_lookup_table()
+
+        bm.to_mesh(meshdata)
+
+        meshdata.normals_split_custom_set_from_vertices(normals)
+        return meshdata
+
+    def makeMeshMultiWeight(self, bm, model, mesh_np, bone_indices, lookupNames, matIndex, normals_out,
+                            clump, vgroup_layer, uv_layer, color_layer, vCount):
+
+        if not model.lookupList:
+            bones = [b for b in clump.bones.values()]
+        else:   
+            bones = [clump.bones[clump.boneIndices[i]] for i in model.lookupList]
+
+        
+        boneNameDict = {b.name: b for b in clump.bones.values()}
+
+        V = mesh_np.vertices["positions"].shape[0]
+        pos   = mesh_np.vertices["positions"]     # (V,4,3)
+        nrm   = mesh_np.vertices["normals"]       # (V,4,3)
+        bids  = mesh_np.vertices["boneIDs"]       # (V,4)
+        wts   = mesh_np.vertices["weights"]       # (V,4)
+        uvs   = mesh_np.vertices["UV"]            # (V,2)
+        flags = mesh_np.vertices["triangleFlags"]  # (V,)
+
+        # 2) Cache bone matrices/rotations once
+        if lookupNames:
+            # use bone names to get the correct bones
+            bone_mats = []
+            for name in lookupNames:
+                bone = boneNameDict.get(name, None)
+                if bone:
+                    bone_mats.append(Matrix(bone.matrix))
+                else:
+                    bone_mats.append(Matrix.Identity(4))
+        else:
+            bone_mats = [Matrix(b.matrix) for b in bones]         # 4x4
+            
+        bone_rot3 = [m.to_3x3() for m in bone_mats]           # 3x3
+
+        # 3) Create verts (accumulated skinned position); collect bm verts in a list
+        bm_verts = [None] * V
+        for i in range(V):
+            # gather up to 4 influences (many will be zeros for slots 2–3)
+            ids = bids[i]
+            ws  = wts[i]
+            p4  = pos[i]
+
+            # accumulate skinned position
+            acc = Vector((0.0, 0.0, 0.0))
+            # slot 0
+            if ws[0] != 0.0:
+                acc += (bone_mats[ids[0]] @ Vector(p4[0])) * ws[0]
+            # slot 1
+            if ws[1] != 0.0:
+                acc += (bone_mats[ids[1]] @ Vector(p4[1])) * ws[1]
+            # slot 2
+            if ws[2] != 0.0:
+                acc += (bone_mats[ids[2]] @ Vector(p4[2])) * ws[2]
+            # slot 3
+            if ws[3] != 0.0:
+                acc += (bone_mats[ids[3]] @ Vector(p4[3])) * ws[3]
+
+            v = bm.verts.new(acc)
+            bm_verts[i] = v
+
+            # normal: use slot 0’s rotation only (matches your original)
+            n0 = Vector(nrm[i, 0])
+            n_world = bone_rot3[ids[0]] @ n0
+            normals_out.append(n_world.normalized())
+
+            # vertex groups / weights (write only non-zero)
+            # map bone indices (into `bones`) -> group indices via name
+            boneNames = list(lookupNames) if lookupNames else [b.name for b in bones]
+            
+            if ws[0] != 0.0:
+                gi = bone_indices[boneNames[ids[0]]]
+                v[vgroup_layer][gi] = ws[0]
+            if ws[1] != 0.0:
+                gi = bone_indices[boneNames[ids[1]]]
+                v[vgroup_layer][gi] = ws[1]
+            if ws[2] != 0.0:
+                gi = bone_indices[boneNames[ids[2]]]
+                v[vgroup_layer][gi] = ws[2]
+            if ws[3] != 0.0:
+                gi = bone_indices[boneNames[ids[3]]]
+                v[vgroup_layer][gi] = ws[3]
+
+        # 4) Faces: follow your triangleFlag/direction rules while we stream the strip
+        direction = 1  # default flip state if we see a tri before an explicit 1/2
+        for i in range(V):
+            flag = int(flags[i])
+
+            if flag == 1:
+                direction = 1
+                continue
+            elif flag == 2:
+                direction = -1
+                continue
+
+            # flag == 0 -> emit a triangle using (i-2, i-1, i) with direction
+            if i >= 2:
+                if direction == 1:
+                    idxs = (i - 2, i - 1, i)
+                else:
+                    idxs = (i, i - 1, i - 2)
+
+                try:
+                    face = bm.faces.new((bm_verts[idxs[0]], bm_verts[idxs[1]], bm_verts[idxs[2]]))
+                except ValueError:
+                    # face may already exist in certain data; skip safely
+                    face = None
+
+                if face:
+                    face.material_index = matIndex
+                    face.smooth = True
+
+                    # assign per-loop UV/color using the three source vertex indices
+                    for loop, vidx in zip(face.loops, idxs):
+                        loop[uv_layer].uv = uvs[vidx]
+                        loop[color_layer] = (1.0, 1.0, 1.0, 1.0)
+
+                # flip direction for next emitted face
+                direction *= -1
+        
+        #clean up the mesh
+        #bmesh.ops.remove_doubles(bm, verts= bm.verts, dist= 0.000001)
+
+
+    def makeClump(self, cmp):
+        armname = cmp.name
+
+        clump = bpy.data.armatures.new(armname)
+        clump.display_type = 'STICK'
+        clumpobj = bpy.data.objects.new(armname, clump)
+        clumpobj.show_in_front = True
+        
+        self.collection.objects.link(clumpobj)
+
+        bpy.context.view_layer.objects.active = clumpobj
+        bpy.ops.object.editmode_toggle()
+
+        importerProp = bpy.context.scene.ccs_importer
+
+        for b in cmp.bones.values():
+            bone = clump.edit_bones.new(b.name)
+
+            bone_object = b.object
+
+            importerProp.add_object(bone_object, cmp.name)
+
+            bone.use_deform = True
+            bone.tail = Vector((0, 0.01, 0))
+            
+            rotation = Euler((radians(x) for x in b.rot), "ZYX").to_quaternion()
+
+            if b.parent:
+                b.matrix = Matrix(b.parent.matrix) @ Matrix.LocRotScale(Vector(b.pos) * 0.01, rotation, b.scale)
+            else:
+                b.matrix = Matrix.LocRotScale(Vector(b.pos) * 0.01, rotation, b.scale)
+            
+            bone.matrix = b.matrix
+            
+            bone["original_coords"] = [b.pos, b.rot, b.scale]
+            bone["rotation_quat"] = rotation
+            bone["matrix"] = b.matrix
+
+            bone.parent = clump.edit_bones[b.parent.name] if b.parent else None
+        
+        bpy.ops.object.editmode_toggle()
+
+
+    def updateClump(self, cmp, armature):
+        armname = cmp.name
+
+        armature_object = self.collection.objects.get(armature.name)
+        if not armature_object:
+            armature_object = bpy.data.objects.new(armname, armature)
+            armature_object.show_in_front = True
+            
+            self.collection.objects.link(armature_object)
+
+
+        bpy.context.view_layer.objects.active = armature_object
+        bpy.ops.object.mode_set(mode = 'EDIT')
+
+        importerProp = bpy.context.scene.ccs_importer
+
+        for b in cmp.bones.values():
+            if armature.bones.get(b.name):
+                continue
+            bone = armature.edit_bones.new(b.name)
+
+            bone_object = b.object
+
+            importerProp.add_object(bone_object, cmp.name)
+
+            bone.use_deform = True
+            bone.tail = Vector((0, 0.01, 0))
+            
+            rotation = Euler((radians(x) for x in b.rot), "ZYX").to_quaternion()
+
+            if b.parent:
+                b.matrix = Matrix(b.parent.matrix) @ Matrix.LocRotScale(Vector(b.pos) * 0.01, rotation, b.scale)
+            else:
+                b.matrix = Matrix.LocRotScale(Vector(b.pos) * 0.01, rotation, b.scale)
+            
+            bone.matrix = b.matrix
+            
+            bone["original_coords"] = [b.pos, b.rot, b.scale]
+            bone["rotation_quat"] = rotation
+            bone["matrix"] = b.matrix
+
+            bone.parent = armature.edit_bones[b.parent.name] if b.parent else None
+        
+        bpy.ops.object.mode_set(mode = 'OBJECT')
+    
+
+    def makeAction(self, anim):
+        action = bpy.data.actions.new(anim.name)
+        
+        #create a layer
+        action.layers.new(name="AnimLayer")
+        #create a strip
+        action.layers[0].strips.new(type="KEYFRAME")
+        #create a channelbag
+        scene_action_slot = action.slots.new(id_type='SCENE', name="CCS_Scene")
+        #apply the anim to the scene
+        bpy.context.scene.animation_data_create()
+        bpy.context.scene.animation_data.action = action
+
+        bpy.context.scene.animation_data.action_slot = scene_action_slot
+        
+        #add the action to the action list
+        new_scene_action = bpy.context.scene.ccs_manager.ccs_actions.add()
+        new_scene_action.name = anim.name
+        new_scene_action.action = action
+        
+        
+        #set fps to 30
+        bpy.context.scene.render.fps = 30
+
+        #adjust the timeline
+        bpy.context.scene.frame_start = 0
+        bpy.context.scene.frame_end = anim.frameCount - 1
+
+        source = self.source_name
+        target = self.target_name
+
+        for objCtrl in anim.objectControllers:
+            objCtrl: objectController
+            ccsAnmObj = objCtrl.object
+            target_bone = ccsAnmObj.name
+
+            #if ccsAnmObj.name.find(source) != -1:
+                #target_bone = ccsAnmObj.name.replace(source, target)
+            
+            if ccsAnmObj.clump:
+                clump = ccsAnmObj.clump.name
+            else:
+                #try to get it from blender
+                clump = bpy.context.scene.ccs_importer.objects.get(target_bone)
+                if clump:
+                    clump = clump.clump
+                else:
+                    #print(f"ccsAnmObj name {ccsAnmObj.name}, clump {ccsAnmObj.clump}")
+                    clump = None
+                    #continue
+
+            if self.use_target_skeleton:
+                target_armature = bpy.data.objects.get(self.target_skeleton)
+                target_armature.animation_data_create()
+                target_armature.animation_data.action = action
+
+            if clump:
+                armatureObj = bpy.data.objects.get(clump)
+    
+                armatureObj.animation_data_create()
+                armatureObj.animation_data.action = action
+                
+                #create a new action slot with the armature name
+                #check if a slot already exists
+                try:
+                    slot = armatureObj.animation_data.action.slots[f"OB{armatureObj.name}"]
+                except:
+                    slot = armatureObj.animation_data.action.slots.new(id_type='OBJECT', name=armatureObj.name)
+                
+                
+                armatureObj.animation_data.action_slot = slot    
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+
+                posebone = armatureObj.pose.bones.get(target_bone)
+    
+                if not posebone:
+                    continue
+    
+                bone = armatureObj.data.bones.get(posebone.name)
+    
+                bloc = Vector(bone["original_coords"][0]) * 0.01
+                brot = Quaternion(bone["rotation_quat"])
+                bscale = Vector(bone["original_coords"][2])
+    
+                group_name = action.groups.new(name = posebone.name).name
+                #group_name = posebone.name
+    
+                if self.swap_names:
+                    if ccsAnmObj.name.find(source) != -1:
+                        new_bone_name = posebone.name.replace(source, target)
+    
+                        if self.slice_name:
+                            new_bone_name = new_bone_name[self.slice_count:]
+                        
+                        if self.use_target_skeleton:
+                            if target_armature.get(new_bone_name):
+                                new_bone_name = target_armature.get(new_bone_name)
+    
+                        group_name = action.groups.new(name = new_bone_name).name
+                
+                bone_path = f'pose.bones["{group_name}"]'
+
+                
+                locations = self.convertVectorLocation(objCtrl.positions.items(), bloc, brot.inverted())
+                data_path = f'{bone_path}.{"location"}'
+                self.insertFrames(fcurves, group_name, data_path, locations, 3)
+                
+                #Rotations Euler
+                rotations = self.convertEulerRotation(objCtrl.rotationsEuler.items(), brot.inverted())
+                data_path = f'{bone_path}.{"rotation_quaternion"}'
+                self.insertFrames(fcurves, group_name, data_path, rotations, 4)
+                
+                #Rotations Quaternion
+                rotations_quat = self.convertQuaternionRotation(objCtrl.rotationsQuat.items(), brot)
+                
+                data_path = f'{bone_path}.{"rotation_quaternion"}'
+                self.insertFrames(fcurves, group_name, data_path, rotations_quat, 4)
+        
+                scales = self.convertVectorScale(objCtrl.scales.items(), bscale)
+                data_path = f'{bone_path}.{"scale"}'
+                self.insertFrames(fcurves, group_name, data_path, scales, 3)
+
+            if self.import_effects and ccsAnmObj.type == "Effect":
+                effect = bpy.data.objects[f'{ccsAnmObj.model.name}']
+                #effect["original_coords"] = [(1, 2, 3), (w, x, y, z), (1, 1, 1)]
+                effect["original_coords"] = [(0, 0, 0), (1, 0, 0, 0), (1, 1, 1)]
+                #effect["rotation_quat"] = (w, x, y, z)
+                effect["rotation_quat"] = (1.0, 0.0, 0.0, 0.0)  # (w, x, y, z)
+                print(f"import | effect name {effect.name}")
+                group_name = effect.name
+                effect.rotation_mode = 'QUATERNION'
+                
+                #create a new action slot with the effect name
+                #check if a slot already exists
+                try:
+                    slot = armatureObj.animation_data.action.slots[f"OB{ effect.name}"]
+                except:
+                    slot = armatureObj.animation_data.action.slots.new(id_type='OBJECT', name=effect.name)
+                    
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+                
+                #original_coords = effect["original_coords"]
+                bloc = Vector(effect["original_coords"][0]) * 0.01
+                brot = Quaternion(effect["rotation_quat"])
+                bscale = Vector(effect["original_coords"][2])
+                
+                locations = self.convertVectorLocation(objCtrl.positions.items(), bloc, brot.inverted())
+                data_path = f'{"location"}'
+                #self.insertFrames(effect_action, group_name, data_path, locations, 3)
+                self.insertFrames(fcurves, group_name, data_path, locations, 3)
+                
+                #Rotations Euler
+                rotations = self.convertEulerRotation(objCtrl.rotationsEuler.items(), brot.inverted())
+                data_path = f'{"rotation_quaternion"}'
+                #self.insertFrames(effect_action, group_name, data_path, rotations, 4)
+                self.insertFrames(fcurves, group_name, data_path, rotations, 4)
+                
+                #Rotations Quaternion
+                rotations_quat = self.convertQuaternionRotation(objCtrl.rotationsQuat.items(), brot)
+                data_path = f'{"rotation_quaternion"}'
+                #self.insertFrames(effect_action, group_name, data_path, rotations_quat, 4)
+                self.insertFrames(fcurves, group_name, data_path, rotations_quat, 4)
+        
+                scales = self.convertVectorScale(objCtrl.scales.items(), bscale)
+                data_path = f'{"scale"}'
+                #self.insertFrames(effect_action, group_name, data_path, scales, 3)
+                self.insertFrames(fcurves, group_name, data_path, scales, 3)
+                
+        
+        for obj in anim.objects.keys():
+
+            target_bone = obj
+
+            if obj.find(source) != -1:
+                target_bone = obj.replace(source, target)
+
+            #try to get it from blender
+            '''if target_bone.startswith("OBJ_1nrk"):
+                breakpoint()'''
+            clump_ref = None
+            clump = bpy.context.scene.ccs_importer.objects.get(target_bone)
+            if clump:
+                clump = clump.clump
+            else:
+                #attempt to get it from the scene
+                empty_obj = bpy.data.objects.get(target_bone)
+                
+                if empty_obj:
+                    clump_ref = empty_obj.get("clump")
+                
+                if clump_ref:
+                    clump = bpy.data.objects.get(clump_ref).name
+
+                
+                else:
+                    continue
+
+            armatureObj = bpy.data.objects.get(clump)
+
+            armatureObj.animation_data_create()
+            armatureObj.animation_data.action = action
+            
+            #check if a slot already exists
+            try:
+                slot = armatureObj.animation_data.action.slots[f"OB{armatureObj.name}"]
+            except:
+                slot = armatureObj.animation_data.action.slots.new(id_type='OBJECT', name=armatureObj.name)
+            
+            armatureObj.animation_data.action_slot = slot
+            channelbag = action.layers[0].strips[0].channelbag(slot)
+            if channelbag:
+                fcurves = channelbag.fcurves
+            else:
+                fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+
+            posebone = armatureObj.pose.bones.get(target_bone)
+            if not posebone:
+                continue
+            
+            group_name = action.groups.new(name = posebone.name).name
+
+            bone_path = f'pose.bones["{group_name}"]'
+            
+            #attempt to apply the animation to a model that matches a bone name
+            target_model = bpy.data.objects.get(obj.replace('OBJ_', 'MDL_'))
+            opacity_fcurves = fcurves
+            opacity_dict = {}
+            opacity_datapath = f'{bone_path}.{"opacity"}'
+            if target_model:                
+                target_model.animation_data_create()
+                target_model.animation_data.action = action
+                
+                #create a new slot for the model
+                model_slot = target_model.animation_data.action.slots.new(id_type='OBJECT', name=target_model.name)
+                target_model.animation_data.action_slot = model_slot
+                #get the fcurves for the model slot
+                channelbag = action.layers[0].strips[0].channelbag(model_slot)
+                if channelbag:
+                    opacity_fcurves = channelbag.fcurves
+                    opacity_datapath = f'["opacity"]'
+                else:
+                    opacity_fcurves = action.layers[0].strips[0].channelbags.new(model_slot).fcurves
+                    opacity_datapath = f'["opacity"]'
+                
+
+            bone = armatureObj.data.bones.get(posebone.name)
+            bloc = Vector(bone["original_coords"][0]) * 0.01
+            brot = Quaternion(bone["rotation_quat"]).inverted()
+            bscale = Vector(bone["original_coords"][2])
+
+            locations = {}
+            rotations = {}
+            scales = {}
+            visibility = {}
+            
+            startQuat = brot
+            for frame, locrotscaleop in anim.objects[obj].items():
+                loc, rot, scale, opacity, _, _, _ = locrotscaleop
+
+                loc = Vector(loc) * 0.01
+                bind_loc = Vector(bloc)
+                loc.rotate(brot)
+                bind_loc.rotate(brot)
+
+                locations[frame] = loc - bind_loc
+
+                endQuat = brot @ Euler((radians(x) for x in rot), "ZYX").to_quaternion()
+
+                if startQuat.dot(endQuat) < 0:
+                    endQuat.negate()
+                
+                rotations[frame] = endQuat
+                startQuat = endQuat
+
+                scale_factor = Vector([s / b for s, b in zip(scale, bscale)])
+                scales[frame] = scale_factor
+                
+                opacity_dict[frame] = [opacity]
+                if opacity < 0.01:
+                    visibility[frame] = [1]
+                else:
+                    visibility[frame] = [0]
+
+            
+            data_path = f'{bone_path}.{"location"}'
+            self.insertFrames(fcurves, group_name, data_path, locations, 3)
+
+            data_path = f'{bone_path}.{"rotation_quaternion"}'
+            self.insertFrames(fcurves, group_name, data_path, rotations, 4)
+
+            data_path = f'{bone_path}.{"scale"}'
+            self.insertFrames(fcurves, group_name, data_path, scales, 3)
+
+            
+            self.insertFrames(opacity_fcurves, group_name, opacity_datapath, opacity_dict, 1, "CONSTANT")
+            
+            if target_model:
+                self.insertFrames(opacity_fcurves, target_model.name, "hide_viewport", visibility, 1, "CONSTANT")
+
+
+        if self.import_morphs:
+            for morphF in anim.morphs:
+                morphF: morphFrame
+                sourceModel = f"MDL_{morphF[4:]}"
+                if not sourceModel:
+                    continue
+                sourceModelBlender = bpy.data.objects.get(sourceModel)
+                
+                if sourceModelBlender:
+                    #check if a Basis shape key exists
+                    basisShapeKey = sourceModelBlender.data.shape_keys.key_blocks.get("Basis")
+                    if not basisShapeKey:
+                        sourceModelBlender.shape_key_add(name = "Basis")
+                    
+                    sourceModelBlender.animation_data_create()
+                    sourceModelBlender.animation_data.action = action
+                    
+                    fcurves = action.fcurves
+                    
+                    for target in anim.morphs[morphF].keys():
+                        #check if the source model has a shape key for this target
+                        targetShapeKey = sourceModelBlender.data.shape_keys.key_blocks.get(morphF)
+                        if not targetShapeKey:
+                            targetShapeKey = sourceModelBlender.shape_key_add(name = morphF)
+                            targetModelBlender = bpy.data.objects.get(target)
+
+                            if targetModelBlender:
+                                for i in range(len(targetModelBlender.data.vertices)):
+                                    try:
+                                        targetShapeKey.data[i].co = targetModelBlender.data.vertices[i].co
+                                    except:
+                                        print(f"Error at {targetShapeKey.name}")
+                    
+
+                                data_path = f'data.shape_keys.key_blocks["{targetShapeKey.name}"].value'
+                                
+                                morph_values = {f: [1 - anim.morphs[morphF][target][f][0]] for f in anim.morphs[morphF][target].keys()}
+                                
+                                self.insertFrames(fcurves, targetShapeKey.name, data_path, morph_values, 1)
+                    #except:
+                    #    print(f"Error at {targetShapeKey.name}")
+
+
+        '''for camCtrl in anim.cameraControllers:
+            camCtrl: cameraController
+            ccsAnmCam = camCtrl.camera
+            cam = ccsAnmCam.name
+            
+            cameraObject = self.collection.objects.get(cam)
+
+            group_name = action.groups.new(name = cam).name
+
+            if cameraObject:
+                #create a separate action for each camera
+                #camera_action = bpy.data.actions.new(f"{anim.name} ({cam})")
+                camera_action = action
+                #apply the animation on the camera
+                cameraObject.animation_data_create()
+                cameraObject.animation_data.action = camera_action
+
+                #create a camera slot
+                #check if a slot already exists
+                try:
+                    slot = cameraObject.animation_data.action.slots[f"OB{cameraObject.name}"]
+                except:
+                    slot = cameraObject.animation_data.action.slots.new(id_type='OBJECT', name=cameraObject.name)
+
+                cameraObject.animation_data.action_slot = slot
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+            
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+
+                bloc = Vector()
+                brot = Quaternion()
+                locations = self.convertVectorLocation(camCtrl.positions.items(), bloc, brot.inverted())
+                data_path = f'{"location"}'
+                #self.insertFrames(effect_action, group_name, data_path, locations, 3)
+                self.insertFrames(fcurves, group_name, data_path, locations, 3)
+                
+                #Rotations Euler
+                rotations = self.convertEulerRotation(camCtrl.rotationsEuler.items(), brot)
+                data_path = f'{"rotation_quaternion"}'
+                self.insertFrames(fcurves, group_name, data_path, rotations, 4)
+                
+                #Rotations Quaternion
+                rotations_quat = self.convertQuaternionRotation(camCtrl.rotationsQuat.items(), brot)
+                data_path = f'{"rotation_quaternion"}'
+                self.insertFrames(fcurves, group_name, data_path, rotations_quat, 4)'''
+
+
+        for cam in anim.cameras.keys():
+            cameraObject = self.collection.objects.get(cam)
+
+            group_name = action.groups.new(name = cam).name
+
+            if cameraObject:
+                #create a separate action for each camera
+                #camera_action = bpy.data.actions.new(f"{anim.name} ({cam})")
+                camera_action = action
+                #apply the animation on the camera
+                cameraObject.animation_data_create()
+                cameraObject.animation_data.action = camera_action
+
+                #create a camera slot
+                #check if a slot already exists
+                try:
+                    slot = cameraObject.animation_data.action.slots[f"OB{cameraObject.name}"]
+                except:
+                    slot = cameraObject.animation_data.action.slots.new(id_type='OBJECT', name=cameraObject.name)
+
+                cameraObject.animation_data.action_slot = slot
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+            
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+                
+                locations = {}
+                rotations = {}
+                fovs = {}
+                for frame, values in anim.cameras[cam].items():
+                    loc, rot, fov = values
+                    locations[frame] = Vector(loc) * 0.01
+                    rotations[frame] = [radians(r) for r in rot] 
+                    fovs[frame] = [cameraObject.data.sensor_width / (2 * math.tan(radians(fov) / 2))]
+
+                data_path = f'{"location"}'
+                self.insertFrames(fcurves, group_name, data_path, locations, 3)
+                
+                data_path = f'{"rotation_euler"}'
+                self.insertFrames(fcurves, group_name, data_path, rotations, 3)
+
+                data_path = f'{"data.lens"}'
+                self.insertFrames(fcurves, group_name, data_path, fovs, 1)
+
+
+        for light in anim.lights.keys():
+            if light == "Ambient":
+                ambient = anim.lights[light]
+                scene_manager = bpy.context.scene.ccs_manager
+                
+                #group_name = scene_action.groups.new(name = f"Ambient").name
+                group_name = action.groups.new(name = f"Ambient").name
+                
+                ambient_color = {}
+                for frame, values in ambient.items():
+                    ambient_color[frame] = [c / 255 for c in values]
+                    
+                data_path = f'{"ccs_manager.ambient_color"}'
+                self.insertFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, ambient_color, 4)
+
+
+            lightObject = self.collection.objects.get(light)
+
+            group_name = action.groups.new(name = light).name
+
+            if lightObject:
+                for lightChunk in self.ccsf.sortedChunks["Light"]:
+                    if lightObject.name == lightChunk.name:
+                        #print(f"lightType: {lightChunk.lightType.name}")
+                        if lightChunk.lightType.name == 'DistantLight':
+                            #create a separate action for each light
+                            light_action = action
+                            #apply the animation on the light
+                            lightObject.animation_data_create()
+                            lightObject.animation_data.action = light_action
+                            #create a light slot
+                            slot = lightObject.animation_data.action.slots.new(id_type='OBJECT', name=lightObject.name)
+                            lightObject.animation_data.action_slot = slot
+                            
+                            channelbag = action.layers[0].strips[0].channelbag(slot)
+                        
+                            if channelbag:
+                                fcurves = channelbag.fcurves
+                            else:
+                                fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+                            
+
+                            locations = {}
+                            rotations = {}
+                            energy = {}
+                            color = {}
+                            for frame, values in anim.lights[light].items():
+                                rot, col, en = values[:3]
+                                rotations[frame] = [radians(r) for r in rot] 
+                                energy[frame] = [en]
+                                color[frame] = [c / 255 for c in col]
+                            
+                            data_path = f'{"rotation_euler"}'
+                            self.insertFrames(fcurves, group_name, data_path, rotations, 3)
+                        
+                            data_path = f'{"ccs_manager.lightdir_intensity"}'
+                            self.insertFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, energy, 1)
+                            
+                            data_path = f'{"ccs_manager.lightdir_color"}'
+                            self.insertFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, color, 4)
+
+                        if lightChunk.lightType.name == 'OmniLight':
+                            print(f"lightType: {lightChunk.lightType.name}")
+                            light_action = action
+                            #apply the animation on the light
+                            lightObject.animation_data_create()
+                            lightObject.animation_data.action = light_action
+                            #check if a slot already exists
+                            try:
+                                slot = lightObject.animation_data.action.slots[f"OB{lightObject.name}"]
+                            except:
+                                slot = lightObject.animation_data.action.slots.new(id_type='OBJECT', name=lightObject.name)
+
+                            lightObject.animation_data.action_slot = slot
+                            
+                            channelbag = action.layers[0].strips[0].channelbag(slot)
+                        
+                            if channelbag:
+                                fcurves = channelbag.fcurves
+                            else:
+                                fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves
+                            
+
+                            locations = {}
+                            color = {}
+                            energy = {}
+                            radInner = {}
+                            radOuter = {}
+                            scales = {}
+                            for frame, values in anim.lights[light].items():
+                                loc, col, en, radi, rado = values[:5]
+                                locations[frame] = Vector(loc) * 0.01
+                                color[frame] = [c / 255 for c in col]
+                                energy[frame] = [en]
+                                radInner[frame] = [radi]
+                                radOuter[frame] = [rado]
+                                scales[frame] =  Vector((rado * 2, rado * 2, rado * 2)) * 0.01
+
+                            data_path = f'{"location"}'
+                            self.insertFrames(fcurves, group_name, data_path, locations, 3)
+                            
+                            data_path = f'{"lightomni_color"}'
+                            self.insertFrames(fcurves, group_name, data_path, color, 4)
+                        
+                            data_path = f'{"lightomni_intensity"}'
+                            self.insertFrames(fcurves, group_name, data_path, energy, 1)
+
+                            data_path = f'{"lightomni_range_inner"}'
+                            self.insertFrames(fcurves, group_name, data_path, radInner, 1)
+
+                            data_path = f'{"lightomni_range_outer"}'
+                            self.insertFrames(fcurves, group_name, data_path, radOuter, 1)
+
+                            data_path = f'{"scale"}'
+                            self.insertFrames(fcurves, group_name, data_path, scales, 3)
+
+
+        for mat in anim.materialControllers:
+            bmats = [bmat for bmat in bpy.data.materials if bmat.name.endswith(mat.name)]
+            if bmats:
+                blender_mat = bmats[0]
+                group_name = blender_mat.name
+
+                '''material_action = action #bpy.data.actions.new(f"{action.name} ({mat.name})")
+                blender_mat.animation_data_create()
+                blender_mat.animation_data.action = material_action'''
+                
+                #we'll try to find the material in the scene manager
+                scene = bpy.context.scene
+                manager = scene.ccs_manager
+                ccs_scene_mat = manager.ccs_materials.get(blender_mat.name)
+                if ccs_scene_mat:
+                    #try to get its index
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                else:
+                    #add the material to the scene manager
+                    ccs_scene_mat = manager.ccs_materials.add()
+                    ccs_scene_mat.material = blender_mat
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                
+                
+                #get the uvOffsetNode
+                uv_offset_node = blender_mat.node_tree.nodes.get("uvOffsetNode")
+                uv_scale_node = blender_mat.node_tree.nodes.get("uvScaleNode")
+                if uv_offset_node:
+                    uv_offset_node.attribute_name = f"ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvOffset0"
+                if uv_scale_node:
+                    uv_scale_node.attribute_name = f"ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvScale0"
+                
+                #check if a slot already exists
+                '''try:
+                    slot = blender_mat.animation_data.action.slots[f"MA{blender_mat.name}"]
+                except:
+                    slot = blender_mat.animation_data.action.slots.new(id_type='MATERIAL', name=blender_mat.name)
+                
+                blender_mat.animation_data.action_slot = slot
+                    
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves'''
+                
+                offsetX_value = blender_mat["uvOffset"][0]
+                offsetY_value = blender_mat["uvOffset"][1]
+                scaleX_value = blender_mat["uvOffset"][2]
+                scaleY_value = blender_mat["uvOffset"][3]
+                
+                offsetsX = {f: [v - offsetX_value] for f, v in mat.offsetX.items()}
+                offsetsY = {f: [v - offsetY_value] for f, v in mat.offsetY.items()}
+                scalesX = {f: [1 + scaleX_value - v] for f, v in mat.scaleX.items()}
+                scalesY = {f: [1 + scaleY_value - v] for f, v in mat.scaleY.items()}
+                
+                '''data_path = f'{"ccs_material.uvOffset"}'
+                self.insertMaterialFrames(fcurves, group_name, data_path, offsetsX, 0)
+                data_path = f'{"ccs_material.uvOffset"}'
+                self.insertMaterialFrames(fcurves, group_name, data_path, offsetsY, 1)
+                data_path = f'{"ccs_material.uvOffset"}'
+                self.insertMaterialFrames(fcurves, group_name, data_path, scalesX, 2)
+                data_path = f'{"ccs_material.uvOffset"}'
+                self.insertMaterialFrames(fcurves, group_name, data_path, scalesY, 3)'''
+                
+                #we'll try to insert the frames in the scene manager material
+                scene = bpy.context.scene
+                manager = scene.ccs_manager
+                ccs_scene_mat = manager.ccs_materials.get(blender_mat.name)
+                if ccs_scene_mat:
+                    #try to get its index
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                else:
+                    #add the material to the scene manager
+                    ccs_scene_mat = manager.ccs_materials.add()
+                    ccs_scene_mat.material = blender_mat
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                    
+                
+                data_path = f'ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvOffset0'
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, offsetsX, 0)
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, offsetsY, 1)
+                data_path = f'ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvScale0'
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, scalesX, 0)
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, scalesY, 1)
+
+        for mat in anim.materials.keys():
+            bmats = [bmat for bmat in bpy.data.materials if bmat.name.endswith(mat)]
+            if bmats:
+                blender_mat = bmats[0]
+                group_name = blender_mat.name
+
+                #material_action = action
+                #blender_mat.animation_data_create()
+                #blender_mat.animation_data.action = material_action
+                
+                #we'll try to find the material in the scene manager
+                scene = bpy.context.scene
+                manager = scene.ccs_manager
+                ccs_scene_mat = manager.ccs_materials.get(blender_mat.name)
+                if ccs_scene_mat:
+                    #try to get its index
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                else:
+                    #add the material to the scene manager
+                    ccs_scene_mat = manager.ccs_materials.add()
+                    ccs_scene_mat.material = blender_mat
+                    ccs_scene_mat_index = manager.ccs_materials.find(blender_mat.name)
+                
+                #get the uvOffsetNode useSceneManager
+                uv_offset_node = blender_mat.node_tree.nodes.get("uvOffsetNode")
+                uv_scale_node = blender_mat.node_tree.nodes.get("uvScaleNode")
+                use_scene_manager_node = blender_mat.node_tree.nodes.get("useSceneManager")
+                if uv_offset_node:
+                    uv_offset_node.attribute_name = f"ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvOffset0"
+                if uv_scale_node:
+                    uv_scale_node.attribute_name = f"ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvScale0"
+                if use_scene_manager_node:
+                    use_scene_manager_node.inputs[0].default_value = 1.0
+
+                #check if a slot already exists
+                '''try:
+                    slot = blender_mat.animation_data.action.slots[f"MA{blender_mat.name}"]
+                except:
+                    slot = blender_mat.animation_data.action.slots.new(id_type='MATERIAL', name=blender_mat.name)
+                
+                #check if a slot already exists
+                try:
+                    slot = blender_mat.animation_data.action.slots[f"MA{blender_mat.name}"]
+                except:
+                    slot = blender_mat.animation_data.action.slots.new(id_type='MATERIAL', name=blender_mat.name)
+                
+                blender_mat.animation_data.action_slot = slot
+
+                channelbag = action.layers[0].strips[0].channelbag(slot)
+                if channelbag:
+                    fcurves = channelbag.fcurves
+                else:
+                    fcurves = action.layers[0].strips[0].channelbags.new(slot).fcurves'''
+                
+                
+                offsetX_value = blender_mat["uvOffset"][0]
+                offsetY_value = blender_mat["uvOffset"][1]
+                scaleX_value = blender_mat["uvOffset"][2]
+                scaleY_value = blender_mat["uvOffset"][3]
+
+                
+                data_path = f'{"ccs_material.uvOffset"}'
+                offsetsX = {}
+                offsetsY = {}
+                scalesX = {}
+                scalesY = {}
+                for frame, values in anim.materials[mat].items():
+                    offsetsX[frame] = [values[0] - offsetX_value]
+                    offsetsY[frame] = [1 - (values[1] - offsetY_value)]
+                    
+                    if values[2] == 1:
+                        scalesX[frame] = [1]
+                    else:
+                        scalesX[frame] = [1 + values[2] - scaleX_value]
+                        
+                    if values[3] == 1:
+                        scalesY[frame] = [1]
+                    else:
+                        scalesY[frame] = [1 + values[3] - scaleY_value]
+                        
+                '''self.insertMaterialFrames(fcurves, group_name, data_path, offsetsX, 0)
+                self.insertMaterialFrames(fcurves, group_name, data_path, offsetsY, 1)
+                self.insertMaterialFrames(fcurves, group_name, data_path, scalesX, 2)
+                self.insertMaterialFrames(fcurves, group_name, data_path, scalesY, 3)'''
+                
+                # insert the frames in the scene manager material
+                data_path = f'ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvOffset0'
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, offsetsX, 0)
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, offsetsY, 1)
+                data_path = f'ccs_manager.ccs_materials[{ccs_scene_mat_index}].uvScale0'
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, scalesX, 0)
+                self.insertMaterialFrames(bpy.context.scene.animation_data.action.fcurves, group_name, data_path, scalesY, 1)
+
+
+
+    def makeEffectAction(self, effChunk):
+        action = bpy.data.actions.new(effChunk.name)
+        mat = effChunk.model.mesh.material
+        #print(f"mat {mat.name}")
+        bmats = [bmat for bmat in bpy.data.materials if bmat.name.endswith(mat.name)]
+        if bmats:
+            #print(f"bmats {bmats}")
+            blender_mat = bmats[0]
+            group_name = blender_mat.name
+            
+            material_action = bpy.data.actions.new(f"{action.name} ({mat})")
+            blender_mat.animation_data_create()
+            blender_mat.animation_data.action = material_action
+            #print(f"material_action {material_action.name}")
+                        
+            offsetX_value = blender_mat["uvOffset"][0]
+            offsetY_value = blender_mat["uvOffset"][1]
+
+            data_path = f'{"ccs_material.uvOffset"}'
+            offsetsX = {}
+            offsetsY = {}
+            opacity_dict = {}
+            #print(f"effect.model.name {effChunk.model.name}")
+            #print(f"frame count {effChunk.frameCount}")
+                            
+            for i, frameInfo in enumerate(effChunk.frameInfo):
+                frame = effChunk.frameInfo[i]
+                #print(f"frameNum {i}")
+                offsetsX[i] = [frame.offsetX + offsetX_value]
+                offsetsY[i] = [frame.offsetY + offsetY_value]
+                opacity_dict[i] = [frame.opacity]
+                        
+            self.insertMaterialFrames(material_action.fcurves, group_name, data_path, offsetsX, 0)
+            self.insertMaterialFrames(material_action.fcurves, group_name, data_path, offsetsY, 1)
+
+
+    def makeEffCamera(self):
+        if not bpy.data.objects.get("Deafult_Camera"):
+            camera = bpy.data.cameras.new(name="Deafult_Camera")
+            cameraObj = bpy.data.objects.new("Deafult_Camera", camera)
+            bpy.context.collection.objects.link(cameraObj)
+            cameraObj.location = (14.73, -6.5, 9.5)
+            cameraObj.rotation_euler = (math.radians(63.5), 0, math.radians(66.2))
+            
+            if not bpy.data.objects.get("Camera_Helper"):
+                camHelperObj = bpy.data.objects.new("Camera_Helper", None)
+                bpy.context.collection.objects.link(camHelperObj)
+            
+                track_constraint = camHelperObj.constraints.new(type='TRACK_TO')
+                track_constraint.name = f'Track To: Camera'
+                track_constraint.target = cameraObj
+                track_constraint.track_axis = 'TRACK_Z'
+                track_constraint.up_axis = 'UP_Y'
+
+
+    def makeEffCamConstraint(self, effect):
+        
+        helper_constraint = effect.constraints.new(type='CHILD_OF')
+        helper_constraint.name = f'{effect.name}_helper'
+
+        if not bpy.data.objects.get("Camera_Helper"):
+           camHelperObj =  self.makeEffCamera()
+        else:
+            camHelperObj = bpy.data.objects.get("Camera_Helper")
+                
+        helper_constraint.target = camHelperObj
+        helper_constraint.use_location_x = False
+        helper_constraint.use_location_y = False
+        helper_constraint.use_location_z = False
+        helper_constraint.use_scale_x = False
+        helper_constraint.use_scale_y = False
+        helper_constraint.use_scale_z = False
+        
+        bpy.context.view_layer.update()
+        helper_constraint.inverse_matrix = effect.matrix_parent_inverse.copy()
+    
+    
+    def convertEulerRotation(self, keyframes, brot):
+        #Rotations Euler
+        rotations = {}
+        startQuat = brot
+        for frame, rot in keyframes:
+
+            #endQuat = brot.rotation_difference(Euler((radians(x) for x in rot), "ZYX").to_quaternion())
+            endQuat = brot @ Euler((radians(x) for x in rot), "ZYX").to_quaternion()
+
+            if startQuat.dot(endQuat) < 0:
+                endQuat.negate()
+            
+            rotations[frame] = endQuat
+            startQuat = endQuat
+        
+        return rotations
+    
+
+    def convertQuaternionRotation(self, keyframes, brot):
+        rotations = {}
+        startQuat = brot
+        for frame, rotation in keyframes:
+            quat = Quaternion((rotation[3], *rotation[:3]))
+            endQuat = brot.rotation_difference(quat.inverted())
+
+            if startQuat.dot(endQuat) < 0:
+                endQuat.negate()
+            
+            rotations[frame] = endQuat
+            startQuat = endQuat
+
+        return rotations
+
+
+    def convertVectorLocation(self, keyframes, bloc, brot):
+        #locations = {frame : ((Vector(loc) * 0.01) - bloc) for frame, loc in keyframes}
+        locations = {}
+        for frame, loc in keyframes:
+            loc = Vector(loc) * 0.01
+            bind_loc = Vector(bloc)
+            loc.rotate(brot)
+            bind_loc.rotate(brot)
+
+            locations[frame] = loc - bind_loc
+        
+        return locations
+
+    def convertVectorScale(self, keyframes, bscale):
+        scales = {keyframe: Vector([s / b for s, b in zip(value, bscale)]) for keyframe,value in keyframes}
+        
+        return scales
+
+
+    def insertFrames(self, fcurves, group_name, data_path, values, values_count, interpolation='LINEAR'):
+        if len(values):
+            for i in range(values_count):
+                fc = fcurves.new(data_path=data_path, index=i)
+                fc.keyframe_points.add(len(values.keys()))
+                fc.keyframe_points.foreach_set('co', [x for co in list(map(lambda f, v: (f, v[i]), values.keys(), values.values())) for x in co])
+                for kp in fc.keyframe_points:
+                    kp.interpolation = interpolation
+
+                fc.update()
+            
+            # set linear interpolation for all keyframes except the last one
+            for fc in fcurves:
+                for kp in fc.keyframe_points:
+                    kp.interpolation = interpolation
+
+
+    def insertMaterialFrames(self, fcurves, group_name, data_path, values, index):
+        if len(values):
+            fc = fcurves.new(data_path=data_path, index=index)
+            fc.keyframe_points.add(len(values.keys()))
+            fc.keyframe_points.foreach_set('co', [x for co in list(map(lambda f, v: (f, v[0]), values.keys(), values.values())) for x in co])
+
+            fc.update()
+        
+    
+def menu_func_import(self, context):
+    self.layout.operator(CCS_IMPORTER_OT_IMPORT.bl_idname,
+                        text='CyberConnect Streaming File (.ccs)')
