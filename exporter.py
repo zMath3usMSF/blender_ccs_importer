@@ -163,162 +163,10 @@ class CCS_IMPORTER_OT_EXPORT(Operator, ExportHelper):
             exportVersion = self.selected_version
             ccsf.version = self.selected_version
 
-        blender_model = context.object
-        if blender_model is not None and blender_model.select_get():
-            if blender_model.type != 'ARMATURE':
-                if blender_model.parent.type == 'ARMATURE':
-                    blender_model = blender_model.parent
-                else:
-                    self.report({'ERROR'}, f"Selected object {blender_model.name} is not an armature.")
-                    return {"CANCELLED"}
-            
-            #ccsf_model = next((m for m in ccsf.sortedChunks["Model"] if m.name == blender_model.name), None)
-            cmpChunk = next((m for m in ccsf.sortedChunks["Clump"] if m.name == blender_model.name), None)
-            if not cmpChunk:
-                self.report({'ERROR'}, f" Clump named {blender_model.name} not found in ccs file.")
-                return {"CANCELLED"}
-            else:
-                self.report({'INFO'}, f'Found clump named {blender_model.name} in ccs file.')
+        exportModel(self, ccsf, context)
+        
+        exportAnm(self, ccsf, context)
 
-            # Dosen't work as intended yet
-            '''
-            # Bones
-            if self.customBoneData:             # Dosen't work as intended yet
-                for i, cmpBone in cmpChunk.bones.items():
-                    #print(f"cmpBone {cmpBone}")
-                    for bBone in blender_model.data.bones:
-                        if bBone.name == cmpBone.name:
-                            if bBone.parent and cmpBone.parent:
-                                parent_mtx = blender_model.data.bones[bBone.parent.name].matrix_local
-                                local_mtx = parent_mtx.inverted() @ bBone.matrix_local
-                            else:
-                                local_mtx = bBone.matrix_local
-
-                            loc, rot_quat, scale = local_mtx.decompose()
-                            rot_euler = rot_quat.to_euler("ZYX")
-                            #rot_degrees = tuple(round(degrees(a), 3) for a in rot_euler)
-                            rot_degrees = tuple(degrees(a) for a in rot_euler)
-                            
-                            print(f"cmpBone.rot {cmpBone.rot}, {cmpBone.name}")
-                            print(f"rot_degrees {rot_degrees}, {cmpBone.name}")
-
-                            if loc:
-                                cmpBone.pos = list(loc * 100)
-                            if rot_quat:
-                                cmpBone.rot = list(rot_degrees)
-                            if scale:
-                                cmpBone.scale = list(scale)
-                            
-                            # Update the transformation matrix
-                            #print(f"Updated bone {cmpBone.name} with custom properties.")
-                            break
-                '''
-
-            # Mesh
-            for i, child in enumerate(blender_model.children):
-                mesh_obj = child
-                mdlChunk = next((m for m in ccsf.sortedChunks["Model"] if m.name == mesh_obj.name), None)
-                #print(f"mdlChunk: {mdlChunk}")
-                if not mdlChunk:
-                    self.report({'ERROR'}, f"Model named {mesh_obj.name} not found in ccs file.")
-                    return {"CANCELLED"}
-                else:
-                    self.report({'INFO'}, f'Found model named {mesh_obj.name} in ccs file.')
-
-                #print(f"mesh_obj: {mesh_obj}")
-                blender_mesh = mesh_obj.data
-                blender_mesh.calc_loop_triangles()
-                
-                if mdlChunk.tangentBinormalsFlag or self.tangentSpace and exportVersion >= 0x130:
-                    mdlChunk.tangentBinormalsFlag = True
-                    print(f'TODO: Export Tangents & Binormals')
-                    blender_mesh.calc_tangents()
-                    if self.color_tangents:
-                        visualize_tangents(blender_mesh) # Create tangent visualization
-                else:
-                    mdlChunk.tangentBinormalsFlag = False
-
-                #print(f"blender_mesh: {blender_mesh}")
-
-                if not blender_mesh.color_attributes:
-                    blender_mesh.color_attributes.new(name="Color", type="BYTE_COLOR", domain="CORNER")
-                color_layer = blender_mesh.color_attributes[0].data
-                if not  blender_mesh.uv_layers:
-                    blender_mesh.uv_layers.new(name="UV")
-                uv_layer = blender_mesh.uv_layers[0].data
-                vertex_groups = mesh_obj.vertex_groups
-
-
-                # Replace mesh data in model chunks
-                if mdlChunk.modelType & ModelTypes.Deformable and not mdlChunk.modelType & ModelTypes.TrianglesList:
-                    exportDeformable(self, blender_model, mesh_obj, blender_mesh, cmpChunk, mdlChunk, ccsf, uv_layer, color_layer)
-                    #print(f'Exported mdlChunk as DeformableMesh: {mdlChunk.name}')
-
-                elif mdlChunk.modelType == ModelTypes.ShadowMesh:
-                    print(f'TODO: Export ShadowMesh')
-
-                elif mdlChunk.modelType & ModelTypes.TrianglesList:
-                    print(f'TODO: Export TrianglesList')
-
-                else:
-                    print(f'Exported mdlChunk as RigidMesh: {mdlChunk.name}')
-                    exportRigid(self, blender_model, mesh_obj, blender_mesh, cmpChunk, mdlChunk, ccsf, uv_layer, color_layer)
-                    #print(f'Exported mdlChunk as RigidMesh: {mdlChunk.name}')
-        else:
-            self.report({'WARNING'}, "No object selected.")
-
-        anmChunk: ccsAnimation = next((m for m in ccsf.sortedChunks["Animation"] if m.name == "ANM_3nrwwin10"), None)
-        if not anmChunk:
-            self.report({'ERROR'}, "Animation ANM_3nrwwin10 not found.")
-            return {"CANCELLED"}
-
-        action = bpy.data.actions.get("ANM_3nrwwin10")
-
-        # Pega os fcurves do slot do armature correto
-        fcurves = None
-        for slot in action.slots:
-            if slot.name_display == blender_model.name:  # "CMP_1nrw00t0 trall" #
-                for layer in action.layers:
-                    for strip in layer.strips:
-                        for channelbag in strip.channelbags:
-                            if channelbag.slot_handle == slot.handle:
-                                fcurves = channelbag.fcurves
-                                break
-
-        if not fcurves:
-            self.report({'ERROR'}, "No fcurves found for armature in action.")
-            return {"CANCELLED"}
-
-        anmChunk.finalize(ccsf.chunks)  # necessário para ctrl.object não ser None
-
-        armature = blender_model
-
-        for ctrl in anmChunk.objectControllers:
-            bone_name = ctrl.object.name
-            bone_path = f'pose.bones["{bone_name}"]'
-
-            loc_fcs = [next((fc for fc in fcurves if fc.data_path == f'{bone_path}.location' and fc.array_index == i), None) for i in range(3)]
-
-            bone = armature.data.bones.get(bone_name)
-            if not bone:
-                continue
-
-            bloc = Vector(bone["original_coords"][0]) * 0.01
-            brot = Quaternion(bone["rotation_quat"]).inverted()
-
-            if any(loc_fcs):
-                for f in list(ctrl.positions.keys()):
-                    blender_pos = Vector(tuple(fc.evaluate(f) if fc else 0.0 for fc in loc_fcs))
-                    
-                    brot_inv = brot.inverted()
-                    bind_loc = Vector(bloc)
-                    bind_loc.rotate(brot)
-                    
-                    pos = blender_pos + bind_loc
-                    pos.rotate(brot_inv)
-                    
-                    ctrl.positions[f] = tuple(pos * 100)
-                
         elapsed = time() - start_time
         msg = f"Exported in {elapsed:.2f}s"
         print(msg)
@@ -335,6 +183,165 @@ class CCS_IMPORTER_OT_EXPORT(Operator, ExportHelper):
 
         return {'FINISHED'}
 
+def exportAnm(self, ccsf, context):
+    blender_model = context.object
+    anmChunk: ccsAnimation = next((m for m in ccsf.sortedChunks["Animation"] if m.name == "ANM_3nrwwin10"), None)
+    if not anmChunk:
+        self.report({'ERROR'}, "Animation ANM_3nrwwin10 not found.")
+        return {"CANCELLED"}
+
+    action = bpy.data.actions.get("ANM_3nrwwin10")
+
+    # Pega os fcurves do slot do armature correto
+    fcurves = None
+    for slot in action.slots:
+        if slot.name_display == blender_model.name:  # "CMP_1nrw00t0 trall" #
+            for layer in action.layers:
+                for strip in layer.strips:
+                    for channelbag in strip.channelbags:
+                        if channelbag.slot_handle == slot.handle:
+                            fcurves = channelbag.fcurves
+                            break
+
+    if not fcurves:
+        self.report({'ERROR'}, "No fcurves found for armature in action.")
+        return {"CANCELLED"}
+
+    anmChunk.finalize(ccsf.chunks)  # necessário para ctrl.object não ser None
+
+    armature = blender_model
+
+    for ctrl in anmChunk.objectControllers:
+        bone_name = ctrl.object.name
+        bone_path = f'pose.bones["{bone_name}"]'
+
+        loc_fcs = [next((fc for fc in fcurves if fc.data_path == f'{bone_path}.location' and fc.array_index == i), None) for i in range(3)]
+
+        bone = armature.data.bones.get(bone_name)
+        if not bone:
+            continue
+
+        bloc = Vector(bone["original_coords"][0]) * 0.01
+        brot = Quaternion(bone["rotation_quat"]).inverted()
+
+        if any(loc_fcs):
+            for f in list(ctrl.positions.keys()):
+                blender_pos = Vector(tuple(fc.evaluate(f) if fc else 0.0 for fc in loc_fcs))
+                
+                brot_inv = brot.inverted()
+                bind_loc = Vector(bloc)
+                bind_loc.rotate(brot)
+                
+                pos = blender_pos + bind_loc
+                pos.rotate(brot_inv)
+                
+                ctrl.positions[f] = tuple(pos * 100)
+
+def exportModel(self, ccsf, context):
+    blender_model = context.object
+    if blender_model is not None and blender_model.select_get():
+        if blender_model.type != 'ARMATURE':
+            if blender_model.parent.type == 'ARMATURE':
+                blender_model = blender_model.parent
+            else:
+                self.report({'ERROR'}, f"Selected object {blender_model.name} is not an armature.")
+                return {"CANCELLED"}
+        
+        #ccsf_model = next((m for m in ccsf.sortedChunks["Model"] if m.name == blender_model.name), None)
+        cmpChunk = next((m for m in ccsf.sortedChunks["Clump"] if m.name == blender_model.name), None)
+        if not cmpChunk:
+            self.report({'ERROR'}, f" Clump named {blender_model.name} not found in ccs file.")
+            return {"CANCELLED"}
+        else:
+            self.report({'INFO'}, f'Found clump named {blender_model.name} in ccs file.')
+
+        # Dosen't work as intended yet
+        '''
+        # Bones
+        if self.customBoneData:             # Dosen't work as intended yet
+            for i, cmpBone in cmpChunk.bones.items():
+                #print(f"cmpBone {cmpBone}")
+                for bBone in blender_model.data.bones:
+                    if bBone.name == cmpBone.name:
+                        if bBone.parent and cmpBone.parent:
+                            parent_mtx = blender_model.data.bones[bBone.parent.name].matrix_local
+                            local_mtx = parent_mtx.inverted() @ bBone.matrix_local
+                        else:
+                            local_mtx = bBone.matrix_local
+
+                        loc, rot_quat, scale = local_mtx.decompose()
+                        rot_euler = rot_quat.to_euler("ZYX")
+                        #rot_degrees = tuple(round(degrees(a), 3) for a in rot_euler)
+                        rot_degrees = tuple(degrees(a) for a in rot_euler)
+                        
+                        print(f"cmpBone.rot {cmpBone.rot}, {cmpBone.name}")
+                        print(f"rot_degrees {rot_degrees}, {cmpBone.name}")
+
+                        if loc:
+                            cmpBone.pos = list(loc * 100)
+                        if rot_quat:
+                            cmpBone.rot = list(rot_degrees)
+                        if scale:
+                            cmpBone.scale = list(scale)
+                        
+                        # Update the transformation matrix
+                        #print(f"Updated bone {cmpBone.name} with custom properties.")
+                        break
+            '''
+
+        # Mesh
+        for i, child in enumerate(blender_model.children):
+            mesh_obj = child
+            mdlChunk = next((m for m in ccsf.sortedChunks["Model"] if m.name == mesh_obj.name), None)
+            #print(f"mdlChunk: {mdlChunk}")
+            if not mdlChunk:
+                self.report({'ERROR'}, f"Model named {mesh_obj.name} not found in ccs file.")
+                return {"CANCELLED"}
+            else:
+                self.report({'INFO'}, f'Found model named {mesh_obj.name} in ccs file.')
+
+            #print(f"mesh_obj: {mesh_obj}")
+            blender_mesh = mesh_obj.data
+            blender_mesh.calc_loop_triangles()
+            
+            if mdlChunk.tangentBinormalsFlag or self.tangentSpace and exportVersion >= 0x130:
+                mdlChunk.tangentBinormalsFlag = True
+                print(f'TODO: Export Tangents & Binormals')
+                blender_mesh.calc_tangents()
+                if self.color_tangents:
+                    visualize_tangents(blender_mesh) # Create tangent visualization
+            else:
+                mdlChunk.tangentBinormalsFlag = False
+
+            #print(f"blender_mesh: {blender_mesh}")
+
+            if not blender_mesh.color_attributes:
+                blender_mesh.color_attributes.new(name="Color", type="BYTE_COLOR", domain="CORNER")
+            color_layer = blender_mesh.color_attributes[0].data
+            if not  blender_mesh.uv_layers:
+                blender_mesh.uv_layers.new(name="UV")
+            uv_layer = blender_mesh.uv_layers[0].data
+            vertex_groups = mesh_obj.vertex_groups
+
+
+            # Replace mesh data in model chunks
+            if mdlChunk.modelType & ModelTypes.Deformable and not mdlChunk.modelType & ModelTypes.TrianglesList:
+                exportDeformable(self, blender_model, mesh_obj, blender_mesh, cmpChunk, mdlChunk, ccsf, uv_layer, color_layer)
+                #print(f'Exported mdlChunk as DeformableMesh: {mdlChunk.name}')
+
+            elif mdlChunk.modelType == ModelTypes.ShadowMesh:
+                print(f'TODO: Export ShadowMesh')
+
+            elif mdlChunk.modelType & ModelTypes.TrianglesList:
+                print(f'TODO: Export TrianglesList')
+
+            else:
+                print(f'Exported mdlChunk as RigidMesh: {mdlChunk.name}')
+                exportRigid(self, blender_model, mesh_obj, blender_mesh, cmpChunk, mdlChunk, ccsf, uv_layer, color_layer)
+                #print(f'Exported mdlChunk as RigidMesh: {mdlChunk.name}')
+    else:
+        self.report({'WARNING'}, "No object selected.")
+            
 
 def exportRigid(self, blender_model, mesh_obj, blender_mesh, cmpChunk, mdlChunk, ccsf, uv_layer, color_layer):
     # Bone name for rigid mesh
